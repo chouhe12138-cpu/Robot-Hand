@@ -1,0 +1,23 @@
+[
+  {
+    "model": "SAM2.1 small",
+    "path": "src/SAM2_streaming/checkpoints/sam2.1/sam2.1_hiera_small.pt",
+    "source": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt",
+    "bytes": 184416285,
+    "sha256": "6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38"
+  },
+  {
+    "model": "GraspNet RealSense",
+    "path": "src/graspnet-baseline/logs/log_rs/checkpoint-rs.tar",
+    "source": "https://huggingface.co/AIGeeksGroup/GeneralVLA/resolve/cf04f9c258588a2e1f46ecb22268f20b087c917c/checkpoints/v1/checkpoint-rs.tar",
+    "bytes": 12468415,
+    "sha256": "60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868"
+  },
+  {
+    "model": "Fast-FoundationStereo 23-36-37",
+    "path": "src/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth",
+    "source": "https://drive.google.com/file/d/1W1V1H64l9bAi97boEQQ2ueNzzGmSMz-E/view",
+    "bytes": 71098210,
+    "sha256": "af0658f289ec840b292645f8d5538978f06e8cabaa1fd31e84acc91af268e990"
+  }
+]

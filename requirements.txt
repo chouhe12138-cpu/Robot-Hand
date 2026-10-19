@@ -1,0 +1,26 @@
+numpy
+scipy
+tensorboard
+open3d>=0.8
+Pillow
+tqdm
+ultralytics
+volcengine-python-sdk
+pydantic
+httpx[socks]
+pyrealsense2
+hydra-core
+omegaconf
+iopath
+matplotlib
+visualization
+mediapipe
+timm
+einops
+scikit-image
+opencv-contrib-python
+imageio
+pyyaml
+
+# Physical Robotiq 2F-85 mesh geometry
+trimesh

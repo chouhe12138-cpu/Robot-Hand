@@ -1,0 +1,11 @@
+{
+  "source_archive": "/home/ros2/Downloads/ros2_robotiq_gripper-main.zip",
+  "archive_sha256": "2ff507403c40c7d5e8373908dfbe385c5b2fe25749fa66abcde61629431e4451",
+  "archive_comment": "a74d007d8f2f06dc6a503ad21038ba869d4999a6",
+  "included": [
+    "LICENSE",
+    "README.md",
+    "robotiq_description/"
+  ],
+  "use": "Description meshes and mimic kinematics only; existing URCap driver retained"
+}

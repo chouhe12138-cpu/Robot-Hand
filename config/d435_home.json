@@ -1,0 +1,11 @@
+{
+  "joints_deg": [
+    -61.64252920372245,
+    -89.99443887164597,
+    0.054904703014233454,
+    -89.99962708340725,
+    -0.006874812770703792,
+    -0.0014379821913736415
+  ],
+  "note": "User-set initial posture confirmed 2026-10-19; recorded from setup_logs/d435_table_to_hand/20261019_131758_988686/cycle_0001/selection.json"
+}

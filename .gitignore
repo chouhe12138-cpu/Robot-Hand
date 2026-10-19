@@ -1,0 +1,50 @@
+# Build and runtime artifacts
+build/
+install/
+log/
+logs/
+latex/
+output/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+.vscode/
+
+# Model weights and checkpoints (download separately)
+*.pth
+*.pt
+*.pkl
+*.tar
+*.onnx
+*.engine
+*.ts
+cfg.yaml
+weights/*
+!weights/.gitkeep
+src/SAM2_streaming/checkpoints/
+src/Fast-FoundationStereo/weights/
+src/graspnet-baseline/logs/
+
+# Local runtime, calibration records and captured scenes
+.cache/
+.zed-sdk/
+calibration_data/
+captured_data/
+calibration/calib_imgs/
+Fast-FoundationStereo/calibration/calibration_realsense/calib_imgs/
+Fast-FoundationStereo/calibration/calibration_usb_camera/calib_imgs/
+Fast-FoundationStereo/ffsd_demos/outputs/
+
+# Temporary files
+DepthCamera_*.json
+DepthCapture_*.png
+*.pdf
+
+# Agent/tool local state
+.claude/
+.codex
+.agents

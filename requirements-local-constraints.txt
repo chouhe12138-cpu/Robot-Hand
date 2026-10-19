@@ -1,0 +1,11 @@
+# Keep the repository's torch 2.6 / CUDA 12.4 stack and MediaPipe solutions API.
+torch==2.6.0
+torchvision==0.21.0
+xformers==0.0.29.post3
+numpy==1.26.4
+mediapipe==0.10.21
+opencv-python==4.11.0.86
+opencv-contrib-python==4.11.0.86
+setuptools<81
+jax==0.4.35
+jaxlib==0.4.35

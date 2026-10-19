@@ -1,0 +1,38 @@
+# Dependencies actually imported by the bundled handover and model code.
+# "visualization" in upstream requirements is not imported; Open3D provides the viewer.
+numpy
+scipy
+tensorboard
+open3d
+Pillow
+tqdm
+ultralytics
+volcengine-python-sdk
+pydantic
+httpx[socks]
+pyrealsense2
+hydra-core
+omegaconf
+iopath
+matplotlib
+mediapipe
+timm
+einops
+scikit-image
+opencv-python
+opencv-contrib-python
+imageio
+pyyaml
+ur_rtde==1.6.3
+ninja
+wheel
+setuptools<81
+cython
+pyopengl
+empy==3.3.4
+catkin-pkg
+lark
+typeguard
+
+# Physical Robotiq 2F-85 collision meshes
+trimesh
