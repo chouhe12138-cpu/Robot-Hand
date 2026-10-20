@@ -1,0 +1,21 @@
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261020_155343
+READY: grasp and lift endpoint checks passed; review cameras then press SPACE.
+[INFO] [1792482825.438977420] [robot_controller_node]: 2F-85 target pose (Controller): [0.1266409316299562, -0.4905221847951792, 0.015317613099792932, 2.868133905799668, -0.18991662839044998, -0.16889804764381122]
+[INFO] [1792482825.589976419] [robot_controller_node]: Moving to approach pose...
+[INFO] [1792482833.404925871] [robot_controller_node]: Moving to target pose...
+[INFO] [1792482834.708963641] [robot_controller_node]: Closing gripper...
+[INFO] [1792482835.465350692] [robot_controller_node]: Gripper contact result: gap=0.028 m, effort=59.6 N, stalled=True
+[INFO] [1792482835.465751300] [robot_controller_node]: Lifting...
+[INFO] [1792482836.768716253] [robot_controller_node]: Raising object to 0.20 m above grasp TCP height...
+[INFO] [1792482838.508090774] [robot_controller_node]: Waiting for a physical right fist held for 0.7 seconds to start handover...
+[INFO] [1792482842.775025201] [robot_controller_node]: Start fist accepted. Holding position; open the right palm for 0.7 seconds to deliver.
+Saved MediaPipe intent frame: /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/mediapipe_output/20261020_155404_836833/robot2human_open_palm_intent.jpg
+Delivery palm target in base_link: [-0.25348742785956235, 0.6200478456837972, -0.060563964296904915]
+[ERROR] [1792482845.258396860] [robot_controller_node]: Handover stopped; no automatic release/Home: Handover IK branch jump / excessive joint step
+D435 target locked. Press r before selecting another region.
+D435 target locked. Press r before selecting another region.
+Manual release: opening the gripper and returning Home.
+[INFO] [1792482994.187732247] [robot_controller_node]: Returning to fixed Home: manual release (0 key)
+Reset, select new targets.
+Selection cancelled; reselect the ZED target. In-flight inference results will be discarded.
+Reset, select new targets.

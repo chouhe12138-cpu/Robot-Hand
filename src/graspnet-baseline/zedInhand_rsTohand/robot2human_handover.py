@@ -118,12 +118,6 @@ HANDOVER_MAX_TOTAL_JOINT_RAD = math.radians(90)
 HANDOVER_ORIENTATION_TRACKING_TOL_RAD = math.radians(0.5)
 HANDOVER_RIGHT_HAND_TIMEOUT = 5.0
 HANDOVER_RIGHT_HAND_MAX_AGE = 3.0
-FOLLOW_RIGHT_HAND_DISTANCE = 0.15
-FOLLOW_RIGHT_HAND_Z_OFFSET = 0.00
-FOLLOW_MOVE_SPEED = 0.05
-FOLLOW_MOVE_ACCEL = 0.05
-FOLLOW_MAX_XY_STEP = 0.03
-FOLLOW_MAX_Z_STEP = 0.02
 WORKSPACE_OBSERVE_BASE_OFFSET = 0.10
 WORKSPACE_OBSERVE_Z_OFFSET_HIGH = 0.30
 WORKSPACE_OBSERVE_RETRY_STEP = 0.10
@@ -300,11 +294,9 @@ class RobotControllerNode(Node):
         self.right_hand_seen_time = 0.0
         self.right_hand_lock = threading.Lock()
         self.handover_follow_pose = None
-        self.handover_follow_z_offset = None
         self.handover_abort = threading.Event()
         self.handover_error = ""
         self.handover_joint_anchor = None
-        self.handover_delivery_armed = False
         if robot_reachable:
             try:
                 self.rtde_c = RTDEControlInterface(self.ur_ip)
@@ -371,7 +363,6 @@ class RobotControllerNode(Node):
             self.get_logger().info(f"Returning to fixed Home: {reason}")
             move_home(self.rtde_c, self.rtde_r, self.home_joints)
             self.handover_follow_pose = None
-            self.handover_follow_z_offset = None
             self.handover_deadline = None
             self.handover_error = ""
             self.dynamic_start_pose = None
@@ -548,56 +539,6 @@ class RobotControllerNode(Node):
         if not self.rtde_c.moveL(pose, speed, acceleration):
             raise RuntimeError("Handover Cartesian motion failed")
 
-    def build_follow_right_hand_pose(self, hand_base_pos):
-        if self.handover_follow_pose is None:
-            self.handover_follow_pose = list(self.rtde_r.getActualTCPPose())
-        if self.handover_follow_z_offset is None:
-            self.handover_follow_z_offset = FOLLOW_RIGHT_HAND_Z_OFFSET
-
-        current_tcp_pose = self.rtde_r.getActualTCPPose()
-        current_controller_xy = np.array(current_tcp_pose[:2], dtype=float)
-        hand_base_xy = np.array(hand_base_pos[:2], dtype=float)
-        hand_norm = np.linalg.norm(hand_base_xy)
-        if hand_norm < 1e-4:
-            hand_dir = np.array([1.0, 0.0], dtype=float)
-        else:
-            hand_dir = hand_base_xy / hand_norm
-
-        follow_base_xy = hand_base_xy - hand_dir * FOLLOW_RIGHT_HAND_DISTANCE
-        target_controller_xy = np.array([-follow_base_xy[0], -follow_base_xy[1]], dtype=float)
-        delta_xy = target_controller_xy - current_controller_xy
-        delta_norm = np.linalg.norm(delta_xy)
-        if delta_norm > FOLLOW_MAX_XY_STEP:
-            target_controller_xy = current_controller_xy + delta_xy / delta_norm * FOLLOW_MAX_XY_STEP
-
-        current_z = float(current_tcp_pose[2])
-        target_z = float(hand_base_pos[2]) + float(self.handover_follow_z_offset)
-        delta_z = target_z - current_z
-        if abs(delta_z) > FOLLOW_MAX_Z_STEP:
-            target_z = current_z + math.copysign(FOLLOW_MAX_Z_STEP, delta_z)
-
-        rx, ry, rz = self.handover_follow_pose[3], self.handover_follow_pose[4], self.handover_follow_pose[5]
-        return [
-            target_controller_xy[0],
-            target_controller_xy[1],
-            target_z,
-            rx,
-            ry,
-            rz,
-        ]
-
-    def follow_right_hand(self, hand_base_pos):
-        if not self.rtde_c:
-            self.get_logger().error("RTDE not connected.")
-            return
-
-        follow_pose = self.build_follow_right_hand_pose(hand_base_pos)
-        self.get_logger().info(f"Following physical right hand at fixed handover orientation: {follow_pose}")
-        try:
-            self.move_handover_linear(follow_pose, FOLLOW_MOVE_SPEED, FOLLOW_MOVE_ACCEL)
-        except Exception as error:
-            self.hold_handover_error(error)
-
     def ensure_control_script(self, timeout=10.0):
         """Re-upload the ur_rtde control script if it is not running. No motion.
 
@@ -684,7 +625,7 @@ class RobotControllerNode(Node):
             seed = joints
 
     def execute_grasp(self, gg, viz_process=None, prepared_plan=None):
-        """Use ZED in-hand 6D grasp pose execution, then enter handover-follow state."""
+        """Execute the prepared grasp, then wait for fist/open-palm handover confirmation."""
         if not self.rtde_c: 
             self.get_logger().error("RTDE not connected.")
             return False
@@ -734,10 +675,9 @@ class RobotControllerNode(Node):
             with self.right_hand_lock:
                 self.right_hand_base_pos = None
                 self.right_hand_seen_time = 0.0
-            self.handover_delivery_armed = False
             self.handover_error = ""
             STATE = "WAITING_HANDOVER_START_POSE"
-            self.get_logger().info("Waiting for a physical right fist held for 0.7 seconds to start handover...")
+            self.get_logger().info("Waiting for a physical right fist held for 2 seconds to start handover...")
             right_hand_base_pos = self.wait_for_right_hand_base_pos(timeout=30.0)
             if right_hand_base_pos is None:
                 if self.handover_abort.is_set():
@@ -746,22 +686,19 @@ class RobotControllerNode(Node):
                 return False
             if self.handover_abort.is_set():
                 return False
-            # Start from the lifted configuration; do not swing into a fixed
-            # joint shape when the fist is detected. Subsequent follow commands
-            # use short, fixed-orientation Cartesian segments with IK checks.
+            # Hold the lifted configuration until an open palm confirms delivery.
             self.check_handover_motion_state()
             self.handover_joint_anchor = np.array(self.rtde_r.getActualQ(), dtype=float)
             self.handover_follow_pose = list(self.rtde_r.getActualTCPPose())
-            self.handover_follow_z_offset = None
 
-            self.get_logger().info("Object is held. Starting to follow the right hand.")
+            self.get_logger().info("Start fist accepted. Holding position; open the right palm for 2 seconds to deliver.")
             self.handover_deadline = time.monotonic() + 60.0
-            STATE = "FOLLOWING_HAND"
+            STATE = "WAITING_HANDOVER_OPEN"
             return True
 
         except Exception as e:
             self.get_logger().error(f"Grasp execution failed: {e}")
-            if STATE in ("WAITING_HANDOVER_START_POSE", "MOVING_TO_HANDOVER", "FOLLOWING_HAND"):
+            if STATE in ("WAITING_HANDOVER_START_POSE", "MOVING_TO_HANDOVER", "WAITING_HANDOVER_OPEN"):
                 self.hold_handover_error(e)
                 return False
             # Esc must stay stop-only: never release the gripper after a stop request.
@@ -1588,6 +1525,17 @@ def is_fist(hand_landmarks):
     )
     return curled_count == 4
 
+def is_open_palm(hand_landmarks):
+    """Require four extended fingers; a partial fist is not confirmation."""
+    landmarks = hand_landmarks.landmark
+    wrist = landmarks[0]
+    return all(
+        landmark_dist2d(landmarks[tip], wrist)
+        > landmark_dist2d(landmarks[pip], wrist)
+        > landmark_dist2d(landmarks[mcp], wrist) * 1.2
+        for tip, pip, mcp in ((8, 6, 5), (12, 10, 9), (16, 14, 13), (20, 18, 17))
+    )
+
 def calc_hand_base_pos_from_ffs(l_rgb, r_rgb, K_s, bl, pt_x, pt_y, max_depth=1.5, log_prefix="hand"):
     logging.info(f"Calculating depth for {log_prefix} via FFS...")
     with torch.autograd.set_grad_enabled(False):
@@ -2068,8 +2016,11 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                         ROS_NODE.validate_grasp_plan(candidate_plan)
                     except ValueError as e:
                         zed_ui["last_error"] = str(e)
-                        endpoint_rejections.append({"candidate": index, "reason": str(e)})
-                        logging.warning("Candidate %d rejected before READY: %s", index, e)
+                        endpoint_rejections.append({"candidate": index,
+                                                    "force_flip": physical_flips[index],
+                                                    "reason": str(e)})
+                        logging.warning("Candidate %d (force_flip=%s) rejected before READY: %s",
+                                        index, physical_flips[index], e)
                         continue
                     reachable.append(index)
                     if ready_plan is None:
@@ -2271,7 +2222,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
     initialized_dynamic_start = False
     handover_start_calc_running = False
     handover_fist_since = None
-    follow_calc_running = False
+    handover_open_since = None
     
     # 刚启动时，自动触发工作台检测
     doubao_trigger = bool(ARK_API_KEY)
@@ -2288,8 +2239,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                 need_reset = True
                 rs_selection_locked = False
                 workspace_bbox = None
-            if (STATE == "FOLLOWING_HAND" and ROS_NODE.handover_deadline is not None
-                    and time.monotonic() > ROS_NODE.handover_deadline and not follow_calc_running):
+            if (STATE == "WAITING_HANDOVER_OPEN" and ROS_NODE.handover_deadline is not None
+                    and time.monotonic() > ROS_NODE.handover_deadline):
                 ROS_NODE.hold_handover_error("Handover timed out; holding position and object")
             frames_rs = rs_pipeline.poll_for_frames()
             if frames_rs:
@@ -2321,7 +2272,9 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                 # --- MediaPipe Right-Hand Handover (RealSense eye-to-hand) ---
                 if STATE != "WAITING_HANDOVER_START_POSE":
                     handover_fist_since = None
-                if STATE in ("WAITING_HANDOVER_START_POSE", "MOVING_TO_HANDOVER", "WAITING_DELIVERY", "FOLLOWING_HAND", "ERROR"):
+                if STATE != "WAITING_HANDOVER_OPEN":
+                    handover_open_since = None
+                if STATE in ("WAITING_HANDOVER_START_POSE", "MOVING_TO_HANDOVER", "WAITING_HANDOVER_OPEN", "DELIVERING_CALCULATING", "DELIVERING", "ERROR"):
                     results = hands.process(cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB))
                     right_hand_landmarks, right_hand_score = select_right_hand(results)
 
@@ -2345,66 +2298,60 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                             finally:
                                 handover_start_calc_running = False
 
-                        def calc_rs_and_follow(d_img, cam_info, pt_x, pt_y):
-                            nonlocal follow_calc_running
-                            try:
-                                hand_base_pos = calc_hand_base_pos_from_rs_depth(d_img, cam_info, pt_x, pt_y, max_depth=1.5, log_prefix="right hand follow")
-                                if hand_base_pos is not None and STATE == "FOLLOWING_HAND":
-                                    ROS_NODE.update_right_hand_base_pos(hand_base_pos)
-                                    ROS_NODE.follow_right_hand(hand_base_pos)
-                            finally:
-                                follow_calc_running = False
-
                         if STATE == "WAITING_HANDOVER_START_POSE":
                             fist_detected = is_fist(right_hand_landmarks)
                             if not fist_detected:
                                 handover_fist_since = None
                             elif handover_fist_since is None:
                                 handover_fist_since = time.monotonic()
-                            cv2.putText(display, "Hold RIGHT FIST 0.7s to START handover", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            cv2.putText(display, "Hold RIGHT FIST 2s to START handover", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                             if (handover_fist_since is not None
-                                    and time.monotonic() - handover_fist_since >= 0.7
+                                    and time.monotonic() - handover_fist_since >= 2.0
                                     and not handover_start_calc_running):
                                 handover_start_calc_running = True
                                 t = threading.Thread(target=calc_rs_and_update_handover_start, args=(rs_depth_img.copy(), rs_camera_info, cx, cy), daemon=True)
                                 t.start()
-                        elif STATE == "WAITING_DELIVERY":
-                            cv2.putText(display, "Starting to follow Right hand...", (cx-90, cy-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                            STATE = "FOLLOWING_HAND"
-                        elif STATE == "FOLLOWING_HAND":
-                            cv2.putText(display, "Following Right hand at 15cm. Fist to release.", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                            fist_detected = is_fist(right_hand_landmarks)
-                            if not fist_detected:
-                                ROS_NODE.handover_delivery_armed = True
-                            if (fist_detected and ROS_NODE.handover_delivery_armed
-                                    and not follow_calc_running):
-                                ROS_NODE.handover_delivery_armed = False
-                                cv2.putText(display, "Right fist Detected! Delivering...", (cx-80, cy-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                                save_mediapipe_intent_frame(
-                                    display.copy(),
-                                    prefix="robot2human_right_fist_intent",
-                                    detected_text="Detected right fist intent",
-                                )
+                        elif STATE == "WAITING_HANDOVER_OPEN":
+                            cv2.putText(display, "Hold OPEN RIGHT PALM 2s to DELIVER", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            if not is_open_palm(right_hand_landmarks):
+                                handover_open_since = None
+                            elif handover_open_since is None:
+                                handover_open_since = time.monotonic()
+                            if (handover_open_since is not None
+                                    and time.monotonic() - handover_open_since >= 2.0):
+                                handover_open_since = None
                                 STATE = "DELIVERING_CALCULATING"
+                                save_mediapipe_intent_frame(
+                                    display.copy(), prefix="robot2human_open_palm_intent",
+                                    detected_text="Open right palm confirmed delivery",
+                                )
 
                                 def calc_rs_and_deliver(d_img, cam_info, pt_x, pt_y):
                                     global STATE
-                                    hand_base_pos = calc_hand_base_pos_from_rs_depth(d_img, cam_info, pt_x, pt_y, max_depth=1.5, log_prefix="right hand delivery")
-                                    if hand_base_pos is not None:
+                                    try:
+                                        hand_base_pos = calc_hand_base_pos_from_rs_depth(
+                                            d_img, cam_info, pt_x, pt_y, max_depth=1.5,
+                                            log_prefix="right open palm delivery")
+                                        if (STATE != "DELIVERING_CALCULATING"
+                                                or ROS_NODE.handover_abort.is_set()
+                                                or ROS_NODE.stop_requested.is_set()):
+                                            return
+                                        if hand_base_pos is None:
+                                            ROS_NODE.hold_handover_error("Open palm depth invalid; holding position and object")
+                                            return
                                         ROS_NODE.update_right_hand_base_pos(hand_base_pos)
+                                        logging.info("Delivery palm target in base_link: %s", hand_base_pos.tolist())
                                         STATE = "DELIVERING"
                                         ROS_NODE.deliver_to_hand(hand_base_pos)
-                                    else:
-                                        STATE = "FOLLOWING_HAND"
+                                    except Exception as error:
+                                        ROS_NODE.hold_handover_error(error)
 
-                                t = threading.Thread(target=calc_rs_and_deliver, args=(rs_depth_img.copy(), rs_camera_info, cx, cy), daemon=True)
-                                t.start()
-                            elif not follow_calc_running:
-                                follow_calc_running = True
-                                t = threading.Thread(target=calc_rs_and_follow, args=(rs_depth_img.copy(), rs_camera_info, cx, cy), daemon=True)
-                                t.start()
+                                threading.Thread(target=calc_rs_and_deliver,
+                                                 args=(rs_depth_img.copy(), rs_camera_info, cx, cy),
+                                                 daemon=True).start()
                     else:
                         handover_fist_since = None
+                        handover_open_since = None
                         cv2.putText(display, "Waiting for MediaPipe Right hand...", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
                 # --- SAM2 for RealSense (workspace/eye-to-hand stream) ---
@@ -2755,7 +2702,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                     t_select = threading.Thread(target=prompt_selection_mode_after_workspace, daemon=True)
                     t_select.start()
             elif key == ord('0'):
-                if (STATE in ('IDLE', 'ERROR', 'GRASP_TEST_HOLD', 'WAITING_HANDOVER_START_POSE')
+                if (STATE in ('IDLE', 'ERROR', 'GRASP_TEST_HOLD', 'WAITING_HANDOVER_START_POSE',
+                              'WAITING_HANDOVER_OPEN')
                         and not zed_ui['grasp_generation_running']):
                     logging.info("Manual release: opening the gripper and returning Home.")
                     ROS_NODE.abort_and_release('manual release (0 key)')

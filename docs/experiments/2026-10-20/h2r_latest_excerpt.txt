@@ -1,0 +1,70 @@
+Setting current SAM2 targets as workspace...
+Calculating workspace center and edges via RealSense depth...
+[INFO] [1792490378.798131521] [robot_controller_node]: Moving to observation pose (30cm above workspace, 10cm toward base, tool0 X parallel to bbox edge): [0.03502444666753127, -0.41563688376902985, 0.2558243821667752, 1.677518734491157, 2.6562257615873963, 0.0]
+Reset, select new targets.
+[INFO] [1792490378.821473315] [robot_controller_node]: Moving to workspace observation with checked joint motion
+[INFO] [1792490385.061142842] [robot_controller_node]: ZED hand/object selection mode for this round: manual
+[INFO] [1792490385.061579816] [robot_controller_node]: Workspace recognized. Show LEFT hand, then press SPACE to start tracking.
+Workspace observation ready. SPACE to start LEFT hand tracking, or R to reselect workspace.
+W0000 00:00:1792490385.095433   55839 landmark_projection_calculator.cc:186] Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the square ROI. Provide IMAGE_DIMENSIONS or use PROJECTION_MATRIX.
+SPACE accepted. Waiting for LEFT hand to start tracking.
+[INFO] [1792490388.597138580] [robot_controller_node]: Physical left hand direction set handover base yaw to 96.5 deg (delta -3.5 deg).
+Handover observation reached. SPACE to select hand/object.
+[INFO] [1792490393.453267429] [robot_controller_node]: Following physical left hand at fixed handover orientation: [0.16179821554312795, -0.5152580132947429, 0.24784444940394154, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490395.323883908] [robot_controller_node]: Following physical left hand at fixed handover orientation: [0.1320260576240576, -0.5119711080050238, 0.2677616177731421, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490397.178565390] [robot_controller_node]: Following physical left hand at fixed handover orientation: [0.10222940276220371, -0.5088563040077958, 0.2876441773517844, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490399.040919985] [robot_controller_node]: Following physical left hand at fixed handover orientation: [0.07280026367752528, -0.5032308278388408, 0.30753322503175984, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490400.911066133] [robot_controller_node]: Following physical left hand at fixed handover orientation: [0.04368715240924586, -0.49620706086851235, 0.32743910880807725, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490402.771441156] [robot_controller_node]: Following physical left hand at fixed handover orientation: [0.014541371897571962, -0.48928153842895805, 0.347381200272734, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490404.624824154] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.01389962395218714, -0.4798306172713754, 0.36732257031584314, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490406.485728802] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.042250629430702326, -0.4700950320514822, 0.3790621946842473, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490408.241565579] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.070645008141585, -0.4605116139597441, 0.38260681132200475, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490409.960678633] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.08421633268988438, -0.45818696278832655, 0.38050111910694834, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490411.105677558] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.08060072601941243, -0.4439517262903262, 0.3605243222538597, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490412.627642841] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07862511086022203, -0.44547208704101426, 0.34116509404118145, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490413.987843081] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07654761568219007, -0.4480915123256773, 0.33840649240229315, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490414.629092976] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07747122325381256, -0.44864776527014244, 0.34243863964994653, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490415.284762194] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07465475151807724, -0.44815362898469163, 0.34125267189622416, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490415.863083191] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07534695575887396, -0.44720705938869504, 0.3441618816251515, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490416.439659770] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07583726701791309, -0.45102441632516727, 0.34525363763690664, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490417.088142916] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07589139765924086, -0.4496058895387611, 0.34149739299716425, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490417.723607510] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.07637701468632185, -0.4504089938737076, 0.3399468423779567, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+[INFO] [1792490418.163746454] [robot_controller_node]: Following physical left hand at fixed handover orientation: [-0.0756435569201226, -0.44809840837538284, 0.340389030124033, -0.12710493454998523, 2.165040969386175, -2.162546242945913]
+ZED mouse selection requested. Stopping further hand tracking.
+Tracking stopped; queued SPACE accepted: entering ZED manual hand/object selection mode. Please click or box-select hand first, then object.
+Reset ZED hand/object segmentation targets.
+Added manual ZED target 1: hand
+Manual mode needs both hand and object selections before running GraspNet.
+Added manual ZED target 2: object
+Saved MLLM bbox JSON: /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/llm_output/20261020_180029_706699/human2robot_manual_bbox.json
+Saved MLLM bbox image: /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/llm_output/20261020_180029_706699/human2robot_manual_bbox.jpg
+Manual ZED hand/object prompts are ready. Waiting for SAM2 to stabilize before GraspNet.
+Processing ZED frame for handover GraspNet...
+Queued handover grasp generation. SAM2 is ready.
+Saved ZED inhand capture to captured_data/20261020_180032
+/home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/src/graspnet-baseline/utils/loss_utils.py:89: UserWarning: Using torch.cross without specifying the dim arg is deprecated.
+Please either pass the dim explicitly or simply use torch.linalg.cross.
+The default value of dim will change to agree with that of linalg.cross in a future release. (Triggered internally at /pytorch/aten/src/ATen/native/Cross.cpp:62.)
+  axis_z = torch.cross(axis_x, axis_y)
+2F-85 filter: kept=2, width_rejected=25, clearance_rejected=6
+2F-85 physical geometry filtering: selected=2
+Handover grasp filtering: raw=80, orient=33
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261020_180033
+READY: review preview and keep hand/object still; press SPACE to execute.
+Processing ZED frame for handover GraspNet...
+Saved ZED inhand capture to captured_data/20261020_180035
+2F-85 filter: kept=3, width_rejected=26, clearance_rejected=4
+2F-85 physical geometry filtering: selected=3
+Handover grasp filtering: raw=98, orient=33
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261020_180035
+READY: review preview and keep hand/object still; press SPACE to execute.
+Reset ZED hand/object segmentation targets.
+[INFO] [1792490455.641251825] [robot_controller_node]: Target pose (Controller): [-0.041459220265019775, -0.5069048189389371, 0.284875461929073, 0.9124257543779759, 1.5529651382554372, -2.0371150164648655]
+Press SPACE while following to select hand/object.
+Press SPACE while following to select hand/object.
+Press SPACE while following to select hand/object.
+[ERROR] [1792490463.677032090] [robot_controller_node]: Gripper goal acknowledgement timed out; check gripper service
+[ERROR] [1792490463.677315751] [robot_controller_node]: H2R stopped; Home recovery requires a normal stationary controller: Gripper open failed
+[INFO] [1792490471.680614586] [robot_controller_node]: Home reached. Select workspace for a new round.
+Reset ZED hand/object segmentation targets.
+Reset, select new targets.
