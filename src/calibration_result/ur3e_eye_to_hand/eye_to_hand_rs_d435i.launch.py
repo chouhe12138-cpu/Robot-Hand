@@ -1,13 +1,62 @@
-"""Local calibration from calibration_data/d435_eye_to_hand_20261018_204340_085125/calibrated_result/d435_base_calibration.json
-Independent physical validation pending. Publish this child frame only once.
+"""Publish the newest quality-passed D435i eye-to-hand calibration.
+
+The newest calibration_data/d435_eye_to_hand_*/calibrated_result/
+d435_base_calibration.json is read at launch time, so a completed new
+calibration is used on the next launch without editing this file.
+Independent physical validation of the selected transform is still required.
+Publish this child frame only once.
 """
+import json
+from pathlib import Path
+
 from launch import LaunchDescription
+from launch.actions import LogInfo
 from launch_ros.actions import Node
+
+PATTERN = ('calibration_data/d435_eye_to_hand_*/calibrated_result/'
+           'd435_base_calibration.json')
+
+
+def _project_root():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / 'calibration_data').is_dir():
+            return parent
+    raise RuntimeError(f'calibration_data not found above {__file__}')
+
+
+def _latest_calibration():
+    candidates = []
+    for path in _project_root().glob(PATTERN):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            translation = data['translation_m']
+            quaternion = data['quaternion_xyzw']
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if len(translation) != 3 or len(quaternion) != 4:
+            continue
+        if data.get('quality_passed') is not True:
+            continue
+        if (data.get('parent_frame') != 'base_link'
+                or data.get('child_frame') != 'rs_tohand_color_optical_frame'):
+            continue
+        candidates.append((path.parent.parent.name, path, data))
+    if not candidates:
+        raise RuntimeError(
+            f'No quality-passed D435i calibration matches {PATTERN}')
+    return max(candidates, key=lambda item: item[0])[1:]
 
 
 def generate_launch_description():
-    return LaunchDescription([Node(
-        package="tf2_ros", executable="static_transform_publisher",
-        output="log",
-        arguments=['--frame-id', 'base_link', '--child-frame-id', 'rs_tohand_color_optical_frame', '--x', '0.25494109016705735', '--y', '-0.238060878089931', '--z', '0.5480193704097971', '--qx', '-0.9411749721847735', '--qy', '0.24399914958516022', '--qz', '-0.05717021635647178', '--qw', '0.22668403802752268'],
-    )])
+    path, data = _latest_calibration()
+    values = [*data['translation_m'], *data['quaternion_xyzw']]
+    flags = ['--frame-id', 'base_link',
+             '--child-frame-id', 'rs_tohand_color_optical_frame']
+    for name, value in zip(
+            ('--x', '--y', '--z', '--qx', '--qy', '--qz', '--qw'), values):
+        flags += [name, format(float(value), '.12g')]
+    return LaunchDescription([
+        LogInfo(msg=f'D435i eye-to-hand: using newest calibration {path}'),
+        Node(package='tf2_ros', executable='static_transform_publisher',
+             output='log', arguments=flags),
+    ])

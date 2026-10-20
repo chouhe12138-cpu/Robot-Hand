@@ -110,15 +110,12 @@ mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.7, min_tracking_confidence=0.5)
 mp_drawing = mp.solutions.drawing_utils
 PHYSICAL_RIGHT_HAND_MP_LABEL = "Left"
-HANDOVER_DEFAULT_BASE_YAW = math.radians(100)
-HANDOVER_JOINT_SHAPE = [
-    HANDOVER_DEFAULT_BASE_YAW,
-    math.radians(45),
-    math.radians(-95),
-    math.radians(-130),
-    math.radians(-90),
-    math.radians(0),
-]
+# Software continuity guards, not hardware limits or collision clearance.
+HANDOVER_PATH_SAMPLE_M = 0.01
+HANDOVER_MAX_SAMPLE_JOINT_RAD = math.radians(15)
+HANDOVER_MAX_TOTAL_JOINT_RAD = math.radians(90)
+# Tracking tolerance for measured TCP; commanded orientation remains fixed.
+HANDOVER_ORIENTATION_TRACKING_TOL_RAD = math.radians(0.5)
 HANDOVER_RIGHT_HAND_TIMEOUT = 5.0
 HANDOVER_RIGHT_HAND_MAX_AGE = 3.0
 FOLLOW_RIGHT_HAND_DISTANCE = 0.15
@@ -289,6 +286,7 @@ class RobotControllerNode(Node):
 
         self.rtde_c = None
         self.rtde_r = None
+        self.rtde_connection_error = ""
         self.stop_requested = threading.Event()
         self.motion_settings = load_motion_settings()
         self.grasp_only = False
@@ -302,22 +300,35 @@ class RobotControllerNode(Node):
         self.handover_follow_pose = None
         self.handover_follow_z_offset = None
         self.handover_abort = threading.Event()
+        self.handover_error = ""
+        self.handover_joint_anchor = None
+        self.handover_delivery_armed = False
         if robot_reachable:
             try:
                 self.rtde_c = RTDEControlInterface(self.ur_ip)
                 self.rtde_r = RTDEReceiveInterface(self.ur_ip)
                 self.get_logger().info("✓ Connected to UR3e robot arm.")
             except Exception as e:
+                self.rtde_connection_error = str(e)
                 self.get_logger().error(f"Failed to initialize RTDE: {e}")
+                for connection in (self.rtde_r, self.rtde_c):
+                    if connection is not None:
+                        try:
+                            connection.disconnect()
+                        except Exception:
+                            pass
                 self.rtde_c = None
+                self.rtde_r = None
         else:
-            self.get_logger().warning(f"UR3e robot arm at {self.ur_ip} is unreachable! Running in VISION-ONLY mode.")
+            self.rtde_connection_error = f"Robot {self.ur_ip} is unreachable"
+            self.get_logger().error(self.rtde_connection_error)
 
     def ensure_running(self):
         if self.stop_requested.is_set():
             raise RuntimeError("Test stopped by user")
-        if not self.rtde_c or not self.rtde_c.isConnected():
-            raise RuntimeError("RTDE is disconnected")
+        if (not self.rtde_c or not self.rtde_r
+                or not self.rtde_c.isConnected() or not self.rtde_r.isConnected()):
+            raise RuntimeError("RTDE control/receive is disconnected")
         if not self.rtde_c.isProgramRunning() and not self.ensure_control_script():
             raise RuntimeError("RTDE control script is not running; restart the test explicitly")
 
@@ -360,6 +371,7 @@ class RobotControllerNode(Node):
             self.handover_follow_pose = None
             self.handover_follow_z_offset = None
             self.handover_deadline = None
+            self.handover_error = ""
             self.dynamic_start_pose = None
             self.home_revision += 1
             STATE = "IDLE"
@@ -441,52 +453,98 @@ class RobotControllerNode(Node):
                 last_log_time = now
             time.sleep(0.05)
 
-    def get_handover_default_tcp_xy(self):
-        try:
-            default_tcp_pose = self.rtde_c.getForwardKinematics(HANDOVER_JOINT_SHAPE)
-            return np.array(default_tcp_pose[:2], dtype=float)
-        except Exception as e:
-            self.get_logger().warning(f"Failed to compute default handover TCP pose: {e}")
-            return None
+    def hold_handover_error(self, error):
+        """Leave failures stopped, without automatic release, recovery or Home."""
+        global STATE
+        self.handover_abort.set()
+        self.handover_error = str(error)
+        self.handover_deadline = None
+        if not self.stop_requested.is_set():
+            STATE = "ERROR"
+        self.get_logger().error(f"Handover stopped; no automatic release/Home: {error}")
 
-    def build_handover_joint_q(self, hand_base_pos):
-        handover_joint_q = HANDOVER_JOINT_SHAPE.copy()
-        if hand_base_pos is None:
-            self.get_logger().warning("Right hand direction unavailable; using default handover base yaw.")
-            return handover_joint_q
+    def check_handover_motion_state(self):
+        if self.stop_requested.is_set() or self.handover_abort.is_set():
+            raise RuntimeError("Handover aborted")
+        if (not self.rtde_r.isConnected() or not self.rtde_c.isConnected()
+                or self.rtde_r.getRobotMode() != 7 or self.rtde_r.getSafetyMode() != 1
+                or not self.rtde_c.isProgramRunning()):
+            raise RuntimeError("Handover motion blocked by robot/control state")
 
-        hand_controller_xy = np.array([-hand_base_pos[0], -hand_base_pos[1]], dtype=float)
-        hand_xy_norm = np.linalg.norm(hand_controller_xy)
-        if hand_xy_norm < 1e-4:
-            self.get_logger().warning("Right hand XY direction is too small; using default handover base yaw.")
-            return handover_joint_q
+    def validate_handover_path(self, poses):
+        """Sample fixed-orientation Cartesian paths for IK continuity only.
 
-        default_tcp_xy = self.get_handover_default_tcp_xy()
-        if default_tcp_xy is None or np.linalg.norm(default_tcp_xy) < 1e-4:
-            default_xy_angle = 0.0
-        else:
-            default_xy_angle = math.atan2(default_tcp_xy[1], default_tcp_xy[0])
+        Does not model unseen obstacles, arm collisions or held-object geometry.
+        No script recovery and no motion are performed during validation.
+        """
+        self.check_handover_motion_state()
+        # A completed moveL may precede the next RTDE velocity update. Wait
+        # briefly for feedback to settle, without changing the velocity limit.
+        settle_deadline = time.monotonic() + 1.0
+        while max(abs(v) for v in self.rtde_r.getActualQd()) > .003:
+            self.check_handover_motion_state()
+            if time.monotonic() >= settle_deadline:
+                raise RuntimeError("Handover validation requires a stationary robot")
+            time.sleep(.02)
+        start_q = np.array(self.rtde_r.getActualQ(), dtype=float)
+        previous_q = start_q.copy()
+        previous_pose = np.array(self.rtde_r.getActualTCPPose(), dtype=float)
+        if self.handover_joint_anchor is None or self.handover_follow_pose is None:
+            raise RuntimeError("Handover reference is missing")
+        orientation = R.from_rotvec(self.handover_follow_pose[3:])
+        tracking_error = np.linalg.norm(
+            (orientation.inv() * R.from_rotvec(previous_pose[3:])).as_rotvec())
+        if tracking_error > HANDOVER_ORIENTATION_TRACKING_TOL_RAD:
+            raise RuntimeError(
+                f"TCP orientation tracking error {math.degrees(tracking_error):.3f} deg exceeds "
+                f"{math.degrees(HANDOVER_ORIENTATION_TRACKING_TOL_RAD):.3f} deg")
+        for pose in poses:
+            target = np.array(pose, dtype=float)
+            if target.shape != (6,) or not np.all(np.isfinite(target)):
+                raise RuntimeError("Invalid handover pose")
+            if np.linalg.norm((orientation.inv() * R.from_rotvec(target[3:])).as_rotvec()) > 1e-4:
+                raise RuntimeError("Handover must preserve the lifted gripper orientation")
+            count = max(1, math.ceil(np.linalg.norm(target[:3] - previous_pose[:3]) / HANDOVER_PATH_SAMPLE_M))
+            for fraction in np.linspace(0., 1., count + 1)[1:]:
+                sample = previous_pose.copy()
+                sample[:3] += fraction * (target[:3] - previous_pose[:3])
+                # Match moveL's small correction from measured start orientation
+                # to the fixed reference instead of checking a different path.
+                relative_rotation = (R.from_rotvec(previous_pose[3:]).inv()
+                                     * R.from_rotvec(target[3:])).as_rotvec()
+                sample[3:] = (R.from_rotvec(previous_pose[3:])
+                              * R.from_rotvec(fraction * relative_rotation)).as_rotvec()
+                self.check_handover_motion_state()
+                if not self.rtde_c.getInverseKinematicsHasSolution(sample.tolist(), previous_q.tolist()):
+                    raise RuntimeError("Handover path has an unreachable sample")
+                joints = np.array(self.rtde_c.getInverseKinematics(sample.tolist(), previous_q.tolist()), dtype=float)
+                if joints.shape != (6,) or not np.all(np.isfinite(joints)):
+                    raise RuntimeError("Invalid handover IK result")
+                # Select the nearest equivalent angles, then let the controller
+                # reject them if they violate its configured joint limits.
+                joints += 2 * np.pi * np.round((previous_q - joints) / (2 * np.pi))
+                if not self.rtde_c.isJointsWithinSafetyLimits(joints.tolist()):
+                    raise RuntimeError("Handover IK violates joint safety limits")
+                if not self.rtde_c.isPoseWithinSafetyLimits(sample.tolist()):
+                    raise RuntimeError("Handover path violates pose safety limits")
+                if np.max(np.abs(joints - previous_q)) > HANDOVER_MAX_SAMPLE_JOINT_RAD:
+                    raise RuntimeError("Handover IK branch jump / excessive joint step")
+                if np.max(np.abs(joints - self.handover_joint_anchor)) > HANDOVER_MAX_TOTAL_JOINT_RAD:
+                    raise RuntimeError("Handover exceeds joint travel budget from lifted pose")
+                previous_q = joints
+            previous_pose = target
+        if np.max(np.abs(np.array(self.rtde_r.getActualQ()) - start_q)) > .01:
+            raise RuntimeError("Robot changed during handover path validation")
+        return start_q
 
-        hand_xy_angle = math.atan2(hand_controller_xy[1], hand_controller_xy[0])
-        yaw_delta = math.atan2(math.sin(hand_xy_angle - default_xy_angle), math.cos(hand_xy_angle - default_xy_angle))
-        base_yaw = HANDOVER_DEFAULT_BASE_YAW + yaw_delta
-        base_yaw = math.atan2(math.sin(base_yaw), math.cos(base_yaw))
-        handover_joint_q[0] = base_yaw
-        self.get_logger().info(
-            f"Physical right hand direction set handover base yaw to {math.degrees(base_yaw):.1f} deg "
-            f"(delta {math.degrees(yaw_delta):.1f} deg)."
-        )
-        return handover_joint_q
-
-    def get_handover_orientation_for_hand(self, hand_base_pos):
-        handover_joint_q = self.build_handover_joint_q(hand_base_pos)
-        try:
-            facing_tcp_pose = self.rtde_c.getForwardKinematics(handover_joint_q)
-            return facing_tcp_pose[3], facing_tcp_pose[4], facing_tcp_pose[5]
-        except Exception as e:
-            self.get_logger().warning(f"Failed to compute hand-facing orientation: {e}")
-            current_tcp_pose = self.rtde_r.getActualTCPPose()
-            return current_tcp_pose[3], current_tcp_pose[4], current_tcp_pose[5]
+    def move_handover_linear(self, pose, speed, acceleration):
+        start_q = self.validate_handover_path([pose])
+        self.check_handover_motion_state()
+        if np.max(np.abs(np.array(self.rtde_r.getActualQ()) - start_q)) > .01:
+            raise RuntimeError("Robot changed before handover motion")
+        # Keep moveL: sending sampled IK endpoints to moveJ would change the path.
+        if not self.rtde_c.moveL(pose, speed, acceleration):
+            raise RuntimeError("Handover Cartesian motion failed")
 
     def build_follow_right_hand_pose(self, hand_base_pos):
         if self.handover_follow_pose is None:
@@ -533,7 +591,10 @@ class RobotControllerNode(Node):
 
         follow_pose = self.build_follow_right_hand_pose(hand_base_pos)
         self.get_logger().info(f"Following physical right hand at fixed handover orientation: {follow_pose}")
-        self.move_linear(follow_pose, FOLLOW_MOVE_SPEED, FOLLOW_MOVE_ACCEL)
+        try:
+            self.move_handover_linear(follow_pose, FOLLOW_MOVE_SPEED, FOLLOW_MOVE_ACCEL)
+        except Exception as error:
+            self.hold_handover_error(error)
 
     def ensure_control_script(self, timeout=10.0):
         """Re-upload the ur_rtde control script if it is not running. No motion.
@@ -604,7 +665,8 @@ class RobotControllerNode(Node):
 
         lift_pose = post_grasp_lift_pose(
             target_pose, approach_pose, self.motion_settings['post_grasp_lift_height_m'])
-        return {"approach": approach_pose, "grasp": target_pose, "lift": lift_pose}
+        plan = {"approach": approach_pose, "grasp": target_pose, "lift": lift_pose}
+        return plan
 
     def validate_grasp_plan(self, plan):
         self.ensure_running()
@@ -667,24 +729,26 @@ class RobotControllerNode(Node):
                 STATE = "GRASP_TEST_HOLD"
                 self.get_logger().info("Grasp-only test: holding raised object; no handover or release. q returns Home without releasing.")
                 return True
+            with self.right_hand_lock:
+                self.right_hand_base_pos = None
+                self.right_hand_seen_time = 0.0
+            self.handover_delivery_armed = False
+            self.handover_error = ""
             STATE = "WAITING_HANDOVER_START_POSE"
-            self.get_logger().info("Waiting for MediaPipe Right hand before moving to handover position...")
+            self.get_logger().info("Waiting for a physical right fist held for 0.7 seconds to start handover...")
             right_hand_base_pos = self.wait_for_right_hand_base_pos(timeout=30.0)
             if right_hand_base_pos is None:
                 if self.handover_abort.is_set():
                     return False
-                self.return_home("no right hand within 30 seconds; keep object held")
+                self.hold_handover_error("No start fist within 30 seconds; holding position and object")
                 return False
             if self.handover_abort.is_set():
                 return False
-            handover_joint_q = self.build_handover_joint_q(right_hand_base_pos)
-            STATE = "MOVING_TO_HANDOVER"
-            if self.handover_abort.is_set():
-                return False
-            self.get_logger().info("Moving to Handover Observation Position...")
-            self.move_joint(handover_joint_q, 0.5, 0.5)
-            if self.handover_abort.is_set():
-                return False
+            # Start from the lifted configuration; do not swing into a fixed
+            # joint shape when the fist is detected. Subsequent follow commands
+            # use short, fixed-orientation Cartesian segments with IK checks.
+            self.check_handover_motion_state()
+            self.handover_joint_anchor = np.array(self.rtde_r.getActualQ(), dtype=float)
             self.handover_follow_pose = list(self.rtde_r.getActualTCPPose())
             self.handover_follow_z_offset = None
 
@@ -695,6 +759,9 @@ class RobotControllerNode(Node):
 
         except Exception as e:
             self.get_logger().error(f"Grasp execution failed: {e}")
+            if STATE in ("WAITING_HANDOVER_START_POSE", "MOVING_TO_HANDOVER", "FOLLOWING_HAND"):
+                self.hold_handover_error(e)
+                return False
             # Esc must stay stop-only: never release the gripper after a stop request.
             if not self.stop_requested.is_set():
                 try:
@@ -733,8 +800,9 @@ class RobotControllerNode(Node):
         # move above the hand center in base_link z, descend to the hand center,
         # release, then retreat back upward in base_link z.
         try:
-            current_tcp_pose = self.rtde_r.getActualTCPPose()
-            rx, ry, rz = current_tcp_pose[3], current_tcp_pose[4], current_tcp_pose[5]
+            if self.handover_follow_pose is None:
+                raise RuntimeError("Handover orientation reference is missing")
+            rx, ry, rz = self.handover_follow_pose[3:]
 
             c_x = -hand_base_pos[0]
             c_y = -hand_base_pos[1]
@@ -744,24 +812,26 @@ class RobotControllerNode(Node):
             deliver_approach_pose = list(deliver_target_pose)
             deliver_approach_pose[2] += 0.05
 
+            # Check the whole approach/descent/retreat before beginning delivery.
+            self.validate_handover_path([deliver_approach_pose, deliver_target_pose, deliver_approach_pose])
             self.get_logger().info(f"Approaching above right-hand center in base_link z: {deliver_approach_pose}")
-            self.move_linear(deliver_approach_pose, 0.15, 0.15)
+            self.move_handover_linear(deliver_approach_pose, 0.15, 0.15)
             time.sleep(0.3)
             self.get_logger().info(f"Descending to right-hand center for release: {deliver_target_pose}")
-            self.move_linear(deliver_target_pose, 0.1, 0.1)
+            self.move_handover_linear(deliver_target_pose, 0.1, 0.1)
             
+            self.check_handover_motion_state()
             if not self.send_gripper_command(0.085):
                 raise RuntimeError("Gripper release failed")
             self.get_logger().info("Object Released to Human.")
             time.sleep(0.5)
 
-            self.move_linear(deliver_approach_pose, 0.15, 0.15)
+            self.move_handover_linear(deliver_approach_pose, 0.15, 0.15)
             
             self.return_home("handover completed")
 
         except Exception as e:
-            self.get_logger().error(f"Delivery failed: {e}")
-            self.return_home("handover failed; preserve gripper state")
+            self.hold_handover_error(e)
 
 # === MLLM 工作台识别 API 调用 ===
 def call_doubao_workspace(image_bgr):
@@ -1568,7 +1638,8 @@ def calc_hand_base_pos_from_ffs(l_rgb, r_rgb, K_s, bl, pt_x, pt_y, max_depth=1.5
     tf_rot = R.from_quat([tf_msg.transform.rotation.x, tf_msg.transform.rotation.y, tf_msg.transform.rotation.z, tf_msg.transform.rotation.w])
     tf_trans = np.array([tf_msg.transform.translation.x, tf_msg.transform.translation.y, tf_msg.transform.translation.z])
     
-    return tf_rot.apply(point_3d_cam) + tf_trans
+    point_base = tf_rot.apply(point_3d_cam) + tf_trans
+    return point_base
 
 
 def compute_ffs_depth_map(l_rgb, r_rgb, K_s, bl):
@@ -1879,6 +1950,14 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
     rclpy.init()
     ROS_NODE = RobotControllerNode()
     ROS_NODE.grasp_only = grasp_only
+    # Do not open a seemingly usable camera UI after robot initialization failed.
+    if (ROS_NODE.rtde_c is None or ROS_NODE.rtde_r is None
+            or not ROS_NODE.rtde_c.isConnected() or not ROS_NODE.rtde_r.isConnected()):
+        reason = ROS_NODE.rtde_connection_error or "RTDE control/receive is disconnected"
+        ROS_NODE.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+        raise RuntimeError(f"Startup aborted before cameras/motion: {reason}. Check robot connection and exit any previous handover process before restarting.")
     executor = MultiThreadedExecutor()
     executor.add_node(ROS_NODE)
     t_ros = threading.Thread(target=executor.spin, daemon=True)
@@ -1915,7 +1994,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
     zed_sam2_predictor = build_sam2_camera_predictor(SAM2_CFG, SAM2_CHECKPOINT)
     zed_sam2_predictor.fill_hole_area = 0
 
-    cv2.namedWindow("Realsense Viewer", cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow("Realsense Viewer", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.resizeWindow("Realsense Viewer", 960, 720)
     cv2.setMouseCallback("Realsense Viewer", mouse_callback)
 
     zed_ui = {
@@ -1938,6 +2018,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
         "grasp_request_pending": False,
         "segmentation_ready_time": 0.0,
         "grasp_generation_running": False,
+        "selection_revision": 0,
         "observe_lowered_once": False,
     }
     selection_prompt_running = False
@@ -1964,6 +2045,10 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
         zed_ui["prepared_grasp"] = None
         zed_ui["last_error"] = ""
 
+        selection_revision = zed_ui["selection_revision"]
+        def selection_cancelled():
+            return selection_revision != zed_ui["selection_revision"] or ROS_NODE.stop_requested.is_set()
+
         def process_grasp_zed(l_rgb, r_rgb, cam_info, dev, c_mask):
             try:
                 def queue_low_observation_retry(reason):
@@ -1972,11 +2057,14 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
 
                 ROS_NODE.ensure_running()
                 depth_mm, disp = compute_ffs_depth_and_disp(l_rgb, r_rgb, K_scaled, baseline)
+                if selection_cancelled():
+                    return
                 end_points, cloud_o3d, workspace_mask = process_frame(l_rgb, depth_mm, cam_info, dev, sam_mask=c_mask)
                 if end_points is None:
                     if not queue_low_observation_retry("No points found in ZED workspace mask."):
                         logging.warning("No points found in ZED workspace mask.")
-                        ROS_NODE.return_home("no valid scene points")
+                        if not selection_cancelled():
+                            ROS_NODE.return_home("no valid scene points")
                     return
 
                 with torch.no_grad():
@@ -1984,6 +2072,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                         end_points = net(end_points)
                         grasp_preds = pred_decode(end_points)
 
+                if selection_cancelled():
+                    return
                 gg_array = grasp_preds[0].detach().cpu().numpy()
                 gg = GraspGroup(gg_array)
                 raw_count = len(gg)
@@ -2010,6 +2100,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                 endpoint_rejections = []
                 reachable = []
                 for index, candidate in enumerate(gg_filtered):
+                    if selection_cancelled():
+                        return
                     try:
                         candidate_plan = ROS_NODE.build_grasp_plan(candidate)
                         ROS_NODE.validate_grasp_plan(candidate_plan)
@@ -2045,6 +2137,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                                  "lift_height_m": ROS_NODE.motion_settings['post_grasp_lift_height_m']},
                 )
 
+                if selection_cancelled():
+                    return
                 gg_vis_array = gg_filtered.grasp_group_array if len(gg_filtered) > 0 else np.empty((0, 17), dtype=np.float32)
                 show_open3d_process(
                     np.asarray(cloud_o3d.points),
@@ -2053,7 +2147,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                 )
                 p = None
 
-                if ROS_NODE.stop_requested.is_set():
+                if selection_cancelled():
                     return
                 if len(gg_filtered) > 0 and ROS_NODE and capture_q is not None:
                     zed_ui["prepared_grasp"] = (gg_filtered, capture_q, time.monotonic(), ready_plan)
@@ -2062,10 +2156,12 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                 elif len(gg_filtered) == 0:
                     if not queue_low_observation_retry("No valid grasp remains after NMS + camera-axis filtering."):
                         logging.warning("No valid grasp remains after NMS + camera-axis filtering.")
-                        ROS_NODE.return_home("no valid grasp")
+                        if not selection_cancelled():
+                            ROS_NODE.return_home("no valid grasp")
             except Exception as e:
                 logging.exception("Grasp preparation failed: %s", e)
-                ROS_NODE.return_home("grasp preparation failed")
+                if not selection_cancelled():
+                    ROS_NODE.return_home("grasp preparation failed")
             finally:
                 zed_ui["grasp_generation_running"] = False
 
@@ -2147,7 +2243,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
             selection_prompt_running = False
 
     def zed_mouse_callback(event, x, y, flags, param):
-        if STATE != "IDLE" or zed_ui["grasp_generation_running"]:
+        if STATE != "IDLE":
             return
         if zed_ui.get("selection_source") != "manual":
             if event == cv2.EVENT_LBUTTONDOWN:
@@ -2182,7 +2278,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
             else:
                 zed_ui["pending_point"] = (x, y)
                 zed_ui["selection_source"] = "manual"
-    cv2.namedWindow("ZED Viewer", cv2.WINDOW_AUTOSIZE)
+    cv2.namedWindow("ZED Viewer", cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    cv2.resizeWindow("ZED Viewer", 960, 540)
     cv2.setMouseCallback("ZED Viewer", zed_mouse_callback)
 
     rs_latest = {"color_img": None, "depth_img": None, "frame_time": 0.0}
@@ -2206,6 +2303,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
     seen_home_revision = ROS_NODE.home_revision
     initialized_dynamic_start = False
     handover_start_calc_running = False
+    handover_fist_since = None
     follow_calc_running = False
     
     # 刚启动时，自动触发工作台检测
@@ -2225,9 +2323,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                 workspace_bbox = None
             if (STATE == "FOLLOWING_HAND" and ROS_NODE.handover_deadline is not None
                     and time.monotonic() > ROS_NODE.handover_deadline and not follow_calc_running):
-                STATE = "RETURNING_HOME"
-                threading.Thread(target=ROS_NODE.return_home,
-                                 args=("handover timed out; keep object held",), daemon=True).start()
+                ROS_NODE.hold_handover_error("Handover timed out; holding position and object")
             frames_rs = rs_pipeline.poll_for_frames()
             if frames_rs:
                 aligned_frames_rs = rs_align.process(frames_rs)
@@ -2256,7 +2352,9 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                     t_select.start()
 
                 # --- MediaPipe Right-Hand Handover (RealSense eye-to-hand) ---
-                if STATE in ("WAITING_HANDOVER_START_POSE", "WAITING_DELIVERY", "FOLLOWING_HAND"):
+                if STATE != "WAITING_HANDOVER_START_POSE":
+                    handover_fist_since = None
+                if STATE in ("WAITING_HANDOVER_START_POSE", "MOVING_TO_HANDOVER", "WAITING_DELIVERY", "FOLLOWING_HAND", "ERROR"):
                     results = hands.process(cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB))
                     right_hand_landmarks, right_hand_score = select_right_hand(results)
 
@@ -2273,7 +2371,9 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                             nonlocal handover_start_calc_running
                             try:
                                 hand_base_pos = calc_hand_base_pos_from_rs_depth(d_img, cam_info, pt_x, pt_y, max_depth=1.5, log_prefix="right hand handover start")
-                                if hand_base_pos is not None:
+                                if (hand_base_pos is not None
+                                        and STATE == "WAITING_HANDOVER_START_POSE"
+                                        and not ROS_NODE.handover_abort.is_set()):
                                     ROS_NODE.update_right_hand_base_pos(hand_base_pos)
                             finally:
                                 handover_start_calc_running = False
@@ -2289,8 +2389,15 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                                 follow_calc_running = False
 
                         if STATE == "WAITING_HANDOVER_START_POSE":
-                            cv2.putText(display, "Aligning handover start to Right hand...", (cx-90, cy-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                            if not handover_start_calc_running:
+                            fist_detected = is_fist(right_hand_landmarks)
+                            if not fist_detected:
+                                handover_fist_since = None
+                            elif handover_fist_since is None:
+                                handover_fist_since = time.monotonic()
+                            cv2.putText(display, "Hold RIGHT FIST 0.7s to START handover", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            if (handover_fist_since is not None
+                                    and time.monotonic() - handover_fist_since >= 0.7
+                                    and not handover_start_calc_running):
                                 handover_start_calc_running = True
                                 t = threading.Thread(target=calc_rs_and_update_handover_start, args=(rs_depth_img.copy(), rs_camera_info, cx, cy), daemon=True)
                                 t.start()
@@ -2299,7 +2406,12 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                             STATE = "FOLLOWING_HAND"
                         elif STATE == "FOLLOWING_HAND":
                             cv2.putText(display, "Following Right hand at 15cm. Fist to release.", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                            if is_fist(right_hand_landmarks) and not follow_calc_running:
+                            fist_detected = is_fist(right_hand_landmarks)
+                            if not fist_detected:
+                                ROS_NODE.handover_delivery_armed = True
+                            if (fist_detected and ROS_NODE.handover_delivery_armed
+                                    and not follow_calc_running):
+                                ROS_NODE.handover_delivery_armed = False
                                 cv2.putText(display, "Right fist Detected! Delivering...", (cx-80, cy-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                                 save_mediapipe_intent_frame(
                                     display.copy(),
@@ -2325,6 +2437,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                                 t = threading.Thread(target=calc_rs_and_follow, args=(rs_depth_img.copy(), rs_camera_info, cx, cy), daemon=True)
                                 t.start()
                     else:
+                        handover_fist_since = None
                         cv2.putText(display, "Waiting for MediaPipe Right hand...", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
                 # --- SAM2 for RealSense (workspace/eye-to-hand stream) ---
@@ -2392,8 +2505,14 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                 t1 = time.time()
                 fps = 1.0 / max(1e-6, (t1 - t0))
                 cv2.putText(display, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                status = f"D435 {'LOCKED' if rs_selection_locked else 'SELECT'} | Targets: {num_targets} | STATE: {STATE} | w=Workspace | SPACE=ZED Grasp | r=reset | 0=Release+Home | ESC=Stop | q=Home/Exit"
+                status = f"D435 {'LOCKED' if rs_selection_locked else 'SELECT'} | Targets: {num_targets} | STATE: {STATE}"
                 cv2.putText(display, status, (10, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(display, "W=Workspace  SPACE=Grasp  R=Reset  0=Release+Home  ESC=Stop", (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+                if STATE == "ERROR" and ROS_NODE.handover_error:
+                    cv2.putText(display, "HANDOVER STOPPED: gestures disabled | 0=Release+Home", (10, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    reason = ROS_NODE.handover_error
+                    for line_index, start in enumerate(range(0, min(len(reason), 150), 65)):
+                        cv2.putText(display, reason[start:start + 65], (10, 115 + 20 * line_index), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
                 cv2.imshow("Realsense Viewer", display)
 
             # --- ZED in-hand stream (for grasp selection) ---
@@ -2575,6 +2694,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                                 nonlocal selection_prompt_running
                                 global STATE
                                 try:
+                                    ROS_NODE.ensure_running()
                                     center_base = calc_hand_base_pos_from_rs_depth(depth_img, camera, pt_x, pt_y, max_depth=2.0, log_prefix="workspace center")
                                     pt1_base = calc_hand_base_pos_from_rs_depth(depth_img, camera, int(e_pt1[0]), int(e_pt1[1]), max_depth=2.0, log_prefix="workspace edge1")
                                     pt2_base = calc_hand_base_pos_from_rs_depth(depth_img, camera, int(e_pt2[0]), int(e_pt2[1]), max_depth=2.0, log_prefix="workspace edge2")
@@ -2649,7 +2769,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                             need_reset = True
                 else:
                     logging.warning("No SAM2 tracking target to set as workspace. Please specify target first.")
-            elif key == ord('r') and STATE == 'IDLE' and not zed_ui['grasp_generation_running']:
+            elif key in (ord('r'), ord('R')) and STATE == 'IDLE':
+                zed_ui['selection_revision'] += 1
                 zed_ui['prepared_grasp'] = None
                 zed_ui['last_error'] = ''
                 rs_selection_locked = False
@@ -2657,9 +2778,12 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
                 need_reset = True
                 zed_ui["need_reset"] = True
                 zed_ui["grasp_request_pending"] = False
-                zed_ui["selection_source"] = None
+                zed_ui["selection_source"] = "manual" if manual else zed_ui["selection_source"]
                 zed_ui["drawing"] = False
-                if STATE == "IDLE" and not selection_prompt_running:
+                zed_ui["pending_bbox"] = None
+                zed_ui["pending_point"] = None
+                logging.info("Selection cancelled; reselect the ZED target. In-flight inference results will be discarded.")
+                if not manual and STATE == "IDLE" and not selection_prompt_running:
                     selection_prompt_running = True
                     t_select = threading.Thread(target=prompt_selection_mode_after_workspace, daemon=True)
                     t_select.start()
@@ -2683,7 +2807,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False):
         rs_pipeline.stop()
         zed.close()
         if ROS_NODE and ROS_NODE.rtde_c: ROS_NODE.rtde_c.stopScript()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
         close_open3d_viewer()
         cv2.destroyAllWindows()
 

@@ -48,6 +48,11 @@ source activate_handover.bash
 | [human2robot_handover.py](src/graspnet-baseline/zedInhand_rsTohand/human2robot_handover.py) | “人递给机器人”入口；未同步本轮 Home、READY、Esc 等流程改动 |
 | [handover_runtime.py](handover_runtime.py) | Home 读取、回位保护、运动配置、抬升位置计算 |
 | [robotiq_grasp.py](robotiq_grasp.py) | 两个入口共用的实体夹爪显示、筛选、TCP 映射 |
+| [tools/calibration/](tools/calibration/) | 标定采集、求解与验证脚本，从 `/home/ros2/Desktop/Object-Hand` 迁入 |
+| [d435_handeye_core.py](d435_handeye_core.py) | 标定板检测、姿态多样性检查与眼在手外求解 |
+| [object_hand/calibration.py](object_hand/calibration.py) | 标定数学工具（变换、均值、误差、OpenCV 手眼求解） |
+| [run_d435_handeye.bash](run_d435_handeye.bash) | D435i 标定入口：空格采集 20 组并自动求解 |
+| [run_zed_handeye.bash](run_zed_handeye.bash) | ZED 标定入口：手动换姿态、空格采集 20 组并自动求解 |
 | [robotiq_2f85_model.py](robotiq_2f85_model.py) | 实体夹爪几何、联动、凸包碰撞检查 |
 | [robot_home.json](config/robot_home.json) | 用户现场摆好的固定 Home，使用弧度关节值 |
 | [handover_motion.json](config/handover_motion.json) | 当前抬升、速度和加速度 |
@@ -70,17 +75,38 @@ source activate_handover.bash
 
 ## 4. 当前标定
 
-- ZED：`calibration_data/zed_eye_in_hand_20261019_140354_716625/calibrated_result/zed_tool0_calibration.json`
-- D435i：`calibration_data/d435_eye_to_hand_20261018_204340_085125/calibrated_result/d435_base_calibration.json`
-- 生效启动文件：`src/calibration_result/ur3e_eye_in_hand/eye_in_hand_zed2i.launch.py` 与 `src/calibration_result/ur3e_eye_to_hand/eye_to_hand_rs_d435i.launch.py`
+- ZED：启动时自动选择最新的 `calibration_data/zed_eye_in_hand_*/calibrated_result/zed_tool0_calibration.json`；当前为 `20261019_140354_716625`。
+- D435i：启动时自动选择最新的、`quality_passed` 为真的 `calibration_data/d435_eye_to_hand_*/calibrated_result/d435_base_calibration.json`；当前为 `20261018_204340_085125`。
+- 生效启动文件：`src/calibration_result/ur3e_eye_in_hand/eye_in_hand_zed2i.launch.py` 与 `src/calibration_result/ur3e_eye_to_hand/eye_to_hand_rs_d435i.launch.py`；两者在启动时读取上述文件，不再硬编码外参。
+- 旧标定目录不会自动删除，保留为历史记录；新标定完成后重启终端 3/4 即可生效，不需要修改 launch 文件。
 
 ZED 变换为 `tool0 → zed_inhand_camera_frame_optical`；D435i 为 `base_link → rs_tohand_color_optical_frame`。同一 child frame 只启动一个发布者。历史上游启动文件归档在 `calibration_data/upstream_launch/`。
+
+标定入口从 `/home/ros2/Desktop/Object-Hand` 迁入，采集与求解逻辑未改：
+
+```bash
+./run_zed_handeye.bash     # 手动换姿态，空格保存 20 组后自动求解
+./run_d435_handeye.bash    # 固定相机，空格保存 20 组后自动求解
+./run_d435_handeye.bash --solve-only calibration_data/<session>
+```
+
+ZED 入口使用 TCP `0 0 0.135 0 0 0` 和 7×5、30 mm 方格、22 mm 标记板；采集只读取 RTDE 状态，不发送运动指令。D435i 采集时相机固定、标定板刚性固定在末端。求解结果写入各自会话的 `calibrated_result/`；新标定不会自动删除旧结果，也不会自动重启正在运行的静态 TF。发布 TF 前确保同一 child frame 只有一个发布者。
 
 旧实物抓取成功提供了局部使用证据，但两份外参尚未完成独立、系统的实物精度验收。ZED 曾出现 self-calibration failed 警告，SDK 仍加载本机内参；不要把该警告直接等同于手眼标定失效，也不能据此保证定位精度。
 
 ## 5. 自主启动抓取测试
 
 以下共五个终端。**每个终端先执行第 2 节的环境加载命令**，并保持在项目根目录。若对应服务已经运行，不要重复启动。
+
+终端 1–4 也可以用脚本一次启动（主程序仍单独运行）：
+
+```bash
+./start_handover.sh       # 启动缺失的服务，等待 /joint_states、夹爪节点和两路 TF 就绪
+./stop_handover.sh        # 停止脚本启动的服务
+./stop_handover.sh --all  # 停止本项目全部相关进程，包括手动启动的
+```
+
+脚本会跳过已经在运行的服务，日志写入 `logs/`，不启动主程序。`--all` 只匹配本项目的驱动、夹爪、两路外参和主程序，不碰其他项目；两种停止方式都不要在持物时使用。
 
 终端 1：机器人驱动与状态发布。
 
@@ -97,13 +123,13 @@ ros2 run robotiq_2f_urcap_adapter robotiq_2f_adapter_node.py \
   --ros-args -p robot_ip:=192.168.1.10
 ```
 
-终端 3：ZED 外参。
+终端 3：ZED 外参，启动时自动读取最新标定。
 
 ```bash
 ros2 launch calibration_result eye_in_hand_zed2i.launch.py
 ```
 
-终端 4：D435i 外参。
+终端 4：D435i 外参，启动时自动读取最新且质量检查通过的标定。
 
 ```bash
 ros2 launch calibration_result eye_to_hand_rs_d435i.launch.py
@@ -247,3 +273,28 @@ ROS 日志位于 `/home/ros2/.ros/log/`。READY 后无动作的关键日志：`p
 5. 最后统一 `human2robot_handover.py` 与 `robot2human_handover.py` 的 Home、READY、`0` 键和脚本恢复逻辑。
 
 不需要重新安装环境、重训模型、重跑全量测试或重新迁移资产。修改及验证只围绕恢复工作的具体目标进行。
+
+
+## 2026-10-20 交接绕转修复（仅离线验证）
+
+本节覆盖上文旧交接流程说明。最新真机日志在检测右手后执行固定关节交接姿态时出现 `Joint motion failed`；用户确认碰撞后自动停下，最后由用户按 `0` 松爪回 Home。未记录动作起点关节角，不能确定实际绕转角度。
+
+- 右手持续握拳 0.7 秒开始交接；本次握拳不会同时触发递送，进入跟随后须先松拳再握拳。等待仍为 30 秒。交接移动期间继续绘制骨架。
+- 删除固定关节交接姿态和底座角归一化移动；从抬升后的实际姿态直接进入短段直线跟随，保持夹爪朝向。
+- 跟随及递送路径按不超过 1 cm 间隔预检查 IK，以前一点为初值、选择最近等价关节角并检查控制器关节/位姿限位。软件保护为单采样关节变化不超过 15°、相对抬升姿态关节变化不超过 90°；这些是拒绝运动的保守策略，不是硬件限位。实际执行仍用 moveL，采样关节值不作为 moveJ 目标。
+- 交接运动失败、路径拒绝或等待/跟随超时进入 ERROR，取消后续交接，不自动松爪或回 Home；人工 `0` 操作保留。抓取阶段的原异常处理与正常交接完成回 Home 保留。
+- 语法及提取实际方法的离线模拟检查通过；未真机验证。采样 IK 检查不构成路径避障或奇异性证明，看不到的障碍、持物几何及正常回 Home 路径仍未建模。
+
+### 14:04 跟随仅移动一段后的修复
+
+`logs/grasp_test.log` 显示首次握拳成功启动跟随，第一段执行后，第二段因 `Handover must preserve the lifted gripper orientation` 进入 ERROR，之后握拳不再触发；最后仍为用户按 `0` 松爪回 Home。原检查将实际 TCP 与目标朝向按 1e-4 rad（约 0.006°）严格比较，混淆了测量/跟踪偏差和修改目标朝向。
+
+现固定目标始终与交接参考比较，实际 TCP 独立采用 0.5° 软件跟踪容差；超限仍拒绝。采样检查插值实际朝向到固定目标的小角度修正，递送沿用同一目标朝向。ERROR 时继续显示骨架，并在 D435i 画面保留停止原因与“手势已禁用”提示。以实际方法离线模拟含 0.017° 实测偏差的连续两段跟随通过，过大偏差、目标旋转、IK 跳变、无解和安全状态异常仍拒绝。此修改未真机验证；日志未记录被拒绝时的实际角度，不能据此声称已测得真机跟踪误差。
+
+
+
+### 当前操作入口（已移除独立诊断模式）
+
+`--test`、独立诊断脚本及其生成的诊断目录已删除。正常运行继续使用 `--manual --debug`；仅抓取使用 `--manual --grasp-only --debug`。原有 `captured_data/<时间>/` 抓取点云、掩膜、候选等记录保留本地，不提交 GitHub。
+
+IDLE 时 R/r 可在推理期间取消选区并重新选择，旧推理结果作废；新推理等待旧推理结束。两个相机窗口支持保持比例缩放。交接预检查保持原静止速度阈值，最多等待 1 秒反馈稳定。RTDE 初始化失败时在加载相机/模型前明确退出，避免空连接进入工作区动作；Ctrl+C 清理避免重复关闭 ROS。以上修复仅离线验证。
