@@ -2130,12 +2130,13 @@ def main(debug=False, manual=False, all_directions=False):
         ROS_NODE.zed_selection_mode_callback = select_zed_mode_for_round
 
     def launch_handover_grasp(c_img, c_bgr, l_rgb, r_rgb, masks):
-        nonlocal handover_grasp_running
+        nonlocal handover_grasp_running, prepared_grasp
         if ROS_NODE.motion_failed.is_set():
             return
         if handover_grasp_running:
             return
         handover_grasp_running = True
+        prepared_grasp = None
 
         object_mask = None
         if 2 in masks and masks[2] is not None:
@@ -2147,7 +2148,7 @@ def main(debug=False, manual=False, all_directions=False):
             logging.warning("No object mask found (ID 2). Stopping H2R grasp preparation.")
 
         if object_mask is None:
-            ROS_NODE.hold_motion_error("H2R requires a valid object mask; reselect the object")
+            logging.warning("H2R requires a valid object mask; reselect the object before preparing.")
             handover_grasp_running = False
             return
 
