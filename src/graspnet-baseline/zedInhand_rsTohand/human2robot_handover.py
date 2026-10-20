@@ -178,7 +178,7 @@ class Open3DLiveViewer:
                 self.pending_update = None
 
             if update_payload is not None:
-                points, colors, gg_array, top_k = update_payload
+                points, colors, gg_array, top_k, force_flips = update_payload
                 self.cloud.points = o3d.utility.Vector3dVector(points)
                 self.cloud.colors = o3d.utility.Vector3dVector(colors)
 
@@ -192,10 +192,12 @@ class Open3DLiveViewer:
                     self.vis.remove_geometry(geom, reset_bounding_box=False)
                 self.gripper_geometries = []
 
-                gg = GraspGroup(gg_array).nms().sort_by_score()
+                gg = (GraspGroup(gg_array) if force_flips is not None
+                      else GraspGroup(gg_array).nms().sort_by_score())
                 if len(gg) > 0:
                     show_n = min(len(gg), max(int(top_k), 1))
-                    self.gripper_geometries = grasp_meshes(gg[:show_n])
+                    shown_flips = None if force_flips is None else force_flips[:show_n]
+                    self.gripper_geometries = grasp_meshes(gg[:show_n], force_flips=shown_flips)
                     for geom in self.gripper_geometries:
                         self.vis.add_geometry(geom, reset_bounding_box=False)
 
@@ -214,7 +216,7 @@ class Open3DLiveViewer:
         self.vis.destroy_window()
         self.vis = None
 
-    def update(self, points, colors, gg_array, top_k=1):
+    def update(self, points, colors, gg_array, top_k=1, force_flips=None):
         self.ready_event.wait()
         with self.lock:
             self.pending_update = (
@@ -222,6 +224,7 @@ class Open3DLiveViewer:
                 np.asarray(colors, dtype=np.float64),
                 np.asarray(gg_array),
                 top_k,
+                force_flips,
             )
 
     def close(self):
@@ -605,7 +608,47 @@ class RobotControllerNode(Node):
         self.get_logger().info(f"Following physical left hand at fixed handover orientation: {follow_pose}")
         self.move_linear(follow_pose, FOLLOW_MOVE_SPEED, FOLLOW_MOVE_ACCEL)
 
-    def execute_grasp(self, gg, viz_process=None, require_confirmation=True):
+    def build_grasp_plan(self, grasp, force_flip=None):
+        """Convert the selected and collision-checked gripper orientation into TCP poses."""
+        self.ensure_motion_ready()
+        tf_msg = self.tf_buffer.lookup_transform(
+            'base_link', 'zed_inhand_camera_frame_optical', rclpy.time.Time())
+        tf_trans = np.array([tf_msg.transform.translation.x,
+                             tf_msg.transform.translation.y,
+                             tf_msg.transform.translation.z])
+        tf_rot = R.from_quat([tf_msg.transform.rotation.x,
+                              tf_msg.transform.rotation.y,
+                              tf_msg.transform.rotation.z,
+                              tf_msg.transform.rotation.w])
+        camera_transform = np.eye(4)
+        camera_transform[:3, :3] = BASE_TO_CONTROLLER_ROT @ tf_rot.as_matrix()
+        camera_transform[:3, 3] = BASE_TO_CONTROLLER_ROT @ tf_trans
+        current_rotation = R.from_rotvec(self.rtde_r.getActualTCPPose()[3:]).as_matrix()
+        target_pose = grasp_tcp_pose(
+            grasp, camera_transform, current_rotation, force_flip=force_flip).tolist()
+        tool_z = R.from_rotvec(target_pose[3:]).as_matrix()[:, 2]
+        approach_pose = list(target_pose)
+        for i in range(3):
+            approach_pose[i] -= GRASP_BACKOFF_DIST * tool_z[i]
+        return {"approach": approach_pose, "grasp": target_pose, "retreat": list(approach_pose)}
+
+    def validate_grasp_plan(self, plan):
+        """Endpoint IK and controller-limit screening; does not certify full path clearance."""
+        self.ensure_motion_ready()
+        seed = np.asarray(self.rtde_r.getActualQ(), dtype=float)
+        for name in ("approach", "grasp", "retreat"):
+            pose = plan[name]
+            if not self.rtde_c.getInverseKinematicsHasSolution(pose, seed.tolist()):
+                raise ValueError(f"{name}: no IK solution; xyz={pose[:3]}")
+            joints = np.asarray(self.rtde_c.getInverseKinematics(pose, seed.tolist()), dtype=float)
+            if joints.shape != (6,) or not np.all(np.isfinite(joints)):
+                raise ValueError(f"{name}: invalid IK result; xyz={pose[:3]}")
+            if (not self.rtde_c.isPoseWithinSafetyLimits(pose)
+                    or not self.rtde_c.isJointsWithinSafetyLimits(joints.tolist())):
+                raise ValueError(f"{name}: controller safety check rejected pose; xyz={pose[:3]}")
+            seed = joints
+
+    def execute_grasp(self, gg, viz_process=None, require_confirmation=True, prepared_plan=None):
         if not self.rtde_c: 
             self.get_logger().error("RTDE not connected.")
             return
@@ -620,26 +663,10 @@ class RobotControllerNode(Node):
             except Exception as e:
                 self.get_logger().warning(f"Failed to close Open3D visualization process: {e}")
         try:
-            best_grasp = gg[0]
-
-
-            tf_msg = self.tf_buffer.lookup_transform('base_link', 'zed_inhand_camera_frame_optical', rclpy.time.Time())
-            tf_trans = np.array([tf_msg.transform.translation.x, tf_msg.transform.translation.y, tf_msg.transform.translation.z])
-            tf_rot = R.from_quat([tf_msg.transform.rotation.x, tf_msg.transform.rotation.y, tf_msg.transform.rotation.z, tf_msg.transform.rotation.w])
-
-            camera_transform = np.eye(4)
-            camera_transform[:3, :3] = BASE_TO_CONTROLLER_ROT @ tf_rot.as_matrix()
-            camera_transform[:3, 3] = BASE_TO_CONTROLLER_ROT @ tf_trans
-            current_tcp_pose = self.rtde_r.getActualTCPPose()
-            current_rotation = R.from_rotvec(current_tcp_pose[3:]).as_matrix()
-            target_pose = grasp_tcp_pose(best_grasp, camera_transform, current_rotation).tolist()
-            R_target = R.from_rotvec(target_pose[3:]).as_matrix()
-
-            approach_pose = list(target_pose)
-            Z_tool_ctrl = R_target[:, 2] 
-            approach_pose[0] -= GRASP_BACKOFF_DIST * Z_tool_ctrl[0]
-            approach_pose[1] -= GRASP_BACKOFF_DIST * Z_tool_ctrl[1]
-            approach_pose[2] -= GRASP_BACKOFF_DIST * Z_tool_ctrl[2]
+            plan = prepared_plan if prepared_plan is not None else self.build_grasp_plan(gg[0])
+            self.validate_grasp_plan(plan)
+            target_pose = plan["grasp"]
+            approach_pose = plan["approach"]
             
             self.get_logger().info(f"Target pose (Controller): {target_pose}")
 
@@ -1217,7 +1244,7 @@ def save_pointcloud_xyzrgb(points, colors_rgb, out_path):
     o3d.io.write_point_cloud(out_path, pcd)
 
 
-def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera, workspace_mask, gg_before, gg_after, note="human2robot"):
+def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera, workspace_mask, gg_before, gg_after, note="human2robot", diagnostics=None, force_flips=None):
     if not DEBUG_MODE:
         return None
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1247,7 +1274,7 @@ def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera
     gg_after_array = gg_after.grasp_group_array if len(gg_after) > 0 else np.empty((0, 17), dtype=np.float32)
     np.save(str(save_dir / "grasp_before_filter.npy"), gg_before_array)
     np.save(str(save_dir / "grasp_after_filter.npy"), gg_after_array)
-    save_open3d_compare_images(full_points, full_colors, gg_before_array, gg_after_array, str(save_dir))
+    save_open3d_compare_images(full_points, full_colors, gg_before_array, gg_after_array, str(save_dir), force_flips=force_flips)
 
     filter_info = {
         "timestamp": ts,
@@ -1256,6 +1283,7 @@ def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera
         "selected_count": int(len(gg_after)),
         "image_size": {"width": int(left_rgb.shape[1]), "height": int(left_rgb.shape[0])},
     }
+    filter_info.update(diagnostics or {})
     with open(save_dir / "grasp_filter_info.json", "w", encoding="utf-8") as f:
         json.dump(filter_info, f, ensure_ascii=False, indent=2)
 
@@ -1594,8 +1622,8 @@ def process_frame(color_img, depth_img, camera, device, sam_mask=None, num_point
     
     return end_points, cloud_o3d, workspace_mask
 
-def show_open3d_process(points, colors, gg_array):
-    get_open3d_viewer().update(points, colors, gg_array, top_k=1)
+def show_open3d_process(points, colors, gg_array, force_flips=None):
+    get_open3d_viewer().update(points, colors, gg_array, top_k=1, force_flips=force_flips)
 
 
 def denoise_points(points, colors):
@@ -1957,20 +1985,22 @@ def process_frame(color_img, depth_img, camera, device, sam_mask=None, num_point
     
     return end_points, cloud_o3d, workspace_mask
 
-def show_open3d_process(points, colors, gg_array):
-    get_open3d_viewer().update(points, colors, gg_array, top_k=1)
+def show_open3d_process(points, colors, gg_array, force_flips=None):
+    get_open3d_viewer().update(points, colors, gg_array, top_k=1, force_flips=force_flips)
 
 
-def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top_k=1):
+def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top_k=1, force_flips=None):
     cloud = o3d.geometry.PointCloud()
     cloud.points = o3d.utility.Vector3dVector(points)
     cloud.colors = o3d.utility.Vector3dVector(colors)
 
-    gg = GraspGroup(gg_array).nms().sort_by_score()
+    gg = (GraspGroup(gg_array) if force_flips is not None
+          else GraspGroup(gg_array).nms().sort_by_score())
     geoms = [cloud]
     if len(gg) > 0:
         show_n = min(len(gg), max(int(top_k), 1))
-        geoms.extend(grasp_meshes(gg[:show_n]))
+        shown_flips = None if force_flips is None else force_flips[:show_n]
+        geoms.extend(grasp_meshes(gg[:show_n], force_flips=shown_flips))
 
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=window_name, width=1280, height=720, visible=False)
@@ -1989,13 +2019,13 @@ def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top
     vis.destroy_window()
 
 
-def save_open3d_compare_images(points, colors, gg_before_array, gg_after_array, save_dir):
+def save_open3d_compare_images(points, colors, gg_before_array, gg_after_array, save_dir, force_flips=None):
     before_path = os.path.join(save_dir, "open3d_before_filter.png")
     after_path = os.path.join(save_dir, "open3d_after_filter.png")
 
     try:
         _render_open3d_snapshot(points, colors, gg_before_array, before_path, "Open3D Before Filter", top_k=20)
-        _render_open3d_snapshot(points, colors, gg_after_array, after_path, "Open3D After Filter", top_k=1)
+        _render_open3d_snapshot(points, colors, gg_after_array, after_path, "Open3D After Filter", top_k=1, force_flips=force_flips)
 
         img_before = cv2.imread(before_path)
         img_after = cv2.imread(after_path)
@@ -2004,7 +2034,7 @@ def save_open3d_compare_images(points, colors, gg_before_array, gg_after_array, 
     except Exception as e:
         logging.warning(f"Open3D screenshot save failed: {e}")
 
-def main(debug=False, manual=False):
+def main(debug=False, manual=False, all_directions=False):
     global DEBUG_MODE
     DEBUG_MODE = debug
     global need_reset, num_targets, pending_bbox, pending_point, current_masks, all_prompts, drawing, ix, iy, fx_mouse, fy_mouse
@@ -2111,10 +2141,15 @@ def main(debug=False, manual=False):
         if 2 in masks and masks[2] is not None:
             object_mask = masks[2] > 0
             if object_mask is None or not np.any(object_mask):
-                logging.warning("No object mask found (ID 2), using default depth heuristic.")
+                logging.warning("No object mask found (ID 2). Stopping H2R grasp preparation.")
                 object_mask = None
         else:
-            logging.warning("No object mask found (ID 2), using default depth heuristic.")
+            logging.warning("No object mask found (ID 2). Stopping H2R grasp preparation.")
+
+        if object_mask is None:
+            ROS_NODE.hold_motion_error("H2R requires a valid object mask; reselect the object")
+            handover_grasp_running = False
+            return
 
         logging.info("Processing ZED frame for handover GraspNet...")
         zed_depth_mm, zed_disp = compute_ffs_depth_and_disp(l_rgb, r_rgb, K_scaled, baseline)
@@ -2157,8 +2192,8 @@ def main(debug=False, manual=False):
                         grasp_preds = pred_decode(end_points)
 
                 gg_array = grasp_preds[0].detach().cpu().numpy()
-                gg_filtered = GraspGroup(gg_array).nms().sort_by_score()
-                raw_count = len(gg_filtered)
+                gg_nms = GraspGroup(gg_array).nms().sort_by_score()
+                raw_count = len(gg_nms)
 
                 try:
                     tf_msg = ROS_NODE.tf_buffer.lookup_transform('base_link', 'zed_inhand_camera_frame_optical', rclpy.time.Time())
@@ -2170,22 +2205,42 @@ def main(debug=False, manual=False):
                     ])
                     camera_rot_mat = tf_rot.as_matrix()
                 except Exception as e:
-                    logging.warning(f"Failed to get camera orientation TF, fallback to identity for grasp filtering: {e}")
-                    camera_rot_mat = np.eye(3, dtype=np.float32)
+                    raise RuntimeError("H2R camera orientation TF unavailable; cannot prepare grasp") from e
 
-                gg_filtered = filter_grasps_by_camera_direction(gg_filtered, camera_rot_mat).sort_by_score()
-                orient_count = len(gg_filtered)
-                gg_filtered = filter_grasps(gg_filtered, np.asarray(cloud_o3d.points), GRASP_BACKOFF_DIST)
-                logging.info(f"2F-85 physical geometry filtering: selected={len(gg_filtered)}")
+                gg_camera = (gg_nms if all_directions
+                             else filter_grasps_by_camera_direction(gg_nms, camera_rot_mat).sort_by_score())
+                orient_count = len(gg_camera)
+                gg_physical, physical_flips = filter_grasps(
+                    gg_camera, np.asarray(cloud_o3d.points),
+                    GRASP_BACKOFF_DIST, return_flips=True)
+                physical_count = len(gg_physical)
+                reachable, endpoint_rejections = [], []
+                ready_plan = None
+                for index, candidate in enumerate(gg_physical):
+                    try:
+                        candidate_plan = ROS_NODE.build_grasp_plan(
+                            candidate, force_flip=physical_flips[index])
+                        ROS_NODE.validate_grasp_plan(candidate_plan)
+                    except ValueError as exc:
+                        endpoint_rejections.append({
+                            "candidate": index, "force_flip": physical_flips[index],
+                            "reason": str(exc),
+                        })
+                        continue
+                    reachable.append(index)
+                    if ready_plan is None:
+                        ready_plan = candidate_plan
+                gg_filtered = gg_physical[np.asarray(reachable, dtype=int)]
+                selected_flips = [physical_flips[index] for index in reachable]
                 logging.info(
-                    "Handover grasp filtering: "
-                    f"raw={raw_count}, orient={orient_count}"
-                )
+                    "H2R grasp filtering: nms=%d, direction=%d, physical_orientations=%d, ready=%d",
+                    raw_count, orient_count, physical_count, len(gg_filtered))
 
                 show_open3d_process(
                     np.asarray(cloud_o3d.points),
                     np.asarray(cloud_o3d.colors),
-                    gg_filtered.grasp_group_array if len(gg_filtered) > 0 else np.empty((0, 17), dtype=np.float32)
+                    gg_filtered.grasp_group_array if len(gg_filtered) > 0 else np.empty((0, 17), dtype=np.float32),
+                    force_flips=selected_flips,
                 )
                 p = None
 
@@ -2196,15 +2251,25 @@ def main(debug=False, manual=False):
                     disp=zed_disp,
                     camera=cam_info_i,
                     workspace_mask=workspace_mask,
-                    gg_before=GraspGroup(gg_array).nms().sort_by_score(),
+                    gg_before=gg_nms,
                     gg_after=gg_filtered,
                     note="human2robot",
+                    diagnostics={
+                        "nms_count": raw_count,
+                        "direction_count": orient_count,
+                        "all_directions": all_directions,
+                        "physical_orientation_count": physical_count,
+                        "selected_symmetry_flips": selected_flips,
+                        "endpoint_rejections": endpoint_rejections,
+                    },
+                    force_flips=selected_flips,
                 )
 
                 if len(gg_filtered) == 0 or ROS_NODE is None:
                     raise RuntimeError("No valid grasp candidate generated")
 
-                prepared_grasp = (gg_filtered, np.array(ROS_NODE.rtde_r.getActualQ()), time.monotonic())
+                prepared_grasp = (gg_filtered, np.array(ROS_NODE.rtde_r.getActualQ()),
+                                  time.monotonic(), ready_plan)
                 logging.info("READY: review preview and keep hand/object still; press SPACE to execute.")
             except Exception as error:
                 ROS_NODE.hold_motion_error(error)
@@ -2786,7 +2851,7 @@ def main(debug=False, manual=False):
                 if STATE == "HANDOVER_SEGMENTATION" and prepared_grasp is not None:
                     if handover_grasp_running:
                         continue
-                    selected, expected_q, ready_time = prepared_grasp
+                    selected, expected_q, ready_time, ready_plan = prepared_grasp
                     prepared_grasp = None
                     if (time.monotonic() - ready_time > 30.0
                             or np.max(np.abs(np.array(ROS_NODE.rtde_r.getActualQ()) - expected_q)) > .01):
@@ -2794,16 +2859,16 @@ def main(debug=False, manual=False):
                         continue
                     handover_grasp_running = True
                     STATE = "GRASPING"
-                    def execute_ready(grasps):
+                    def execute_ready(grasps, plan):
                         nonlocal handover_grasp_running, zed_need_reset
                         try:
                             zed_need_reset = True
-                            ROS_NODE.execute_grasp(grasps, require_confirmation=False)
+                            ROS_NODE.execute_grasp(grasps, require_confirmation=False, prepared_plan=plan)
                         except Exception as error:
                             ROS_NODE.hold_motion_error(error)
                         finally:
                             handover_grasp_running = False
-                    threading.Thread(target=execute_ready, args=(selected,), daemon=True).start()
+                    threading.Thread(target=execute_ready, args=(selected, ready_plan), daemon=True).start()
                     continue
                 if STATE != "HANDOVER_SEGMENTATION":
                     logging.warning("Press SPACE while following to select hand/object.")
@@ -2878,9 +2943,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Human-to-robot handover pipeline")
     parser.add_argument("--manual", action="store_true", help="Use manual workspace and hand/object selection without MLLM prompts")
     parser.add_argument("--debug", action="store_true", help="Save debug artifacts like captured_data, llm_output, mediapipe_output")
+    parser.add_argument("--all-directions", action="store_true",
+                        help="Opt in to directions outside ZED 30-degree cone; physical gripper/IK checks still apply")
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
-    main(debug=args.debug, manual=args.manual)
+    main(debug=args.debug, manual=args.manual, all_directions=args.all_directions)
