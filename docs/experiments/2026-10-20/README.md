@@ -1,6 +1,6 @@
 # 2026-10-20 真机实验记录（精选）
 
-本目录只保留 4 组代表场景、压缩截图、少量候选数组和日志摘录。完整点云、深度、模型权重、数据集和完整运行目录留在本地。截图 JPEG 为缩小后的观察材料，不用于精确像素或标定计算；候选数组保留原始数值。样本是人工挑选，不能用于统计成功率。
+本目录只保留 4 组代表场景、压缩截图、少量候选数组和日志摘录。补充保留各组目标区域原始点云，以及最新 H2R 的完整场景点云；其他完整点云、深度、数据集和完整运行目录留在本地。当前使用的 GraspNet 权重另随仓库保留（见下文）。截图 JPEG 为缩小后的观察材料，不用于精确像素或标定计算；候选数组保留原始数值。样本是人工挑选，不能用于统计成功率。
 
 ## 今日结论
 
@@ -35,3 +35,32 @@ H2R 的 0 为显式打开夹爪并回 Home；夹爪未确认时提示可能仍�
 R2H：右手握拳/张掌保持时间均为 2 秒；握拳后等待张掌，再使用一次手部位置进行递送，不再连续追手。完整递送准确性仍需后续验证。
 
 本次归档只做 Python 语法、差异检查及此前最小模拟检查，没有为归档启动相机、机械臂、夹爪或重新执行 GPU 推理。以上真机结果来自操作者当天运行的记录。
+
+## 点云与 GraspNet 权重补充
+
+- 每组 `pointcloud_workspace_used.ply`：原始掩膜与有效深度筛选后的 XYZ/RGB 点云，未降采样；这是送入 GraspNet 采样前的目标区域点集，并非网络实际抽取的固定数量点。
+- 最新 H2R 组另有 `pointcloud_full.ply`：同帧全部有效深度点，可查看物体、手和人体的空间关系。其余三组仅保留局部点云以控制体积。
+- 点云和 `grasp_before_filter.npy` / `grasp_after_filter.npy` 都在该帧 ZED 光学相机坐标系，XYZ 单位为米，不应再施加机械臂基座变换后相互叠加。候选数组是 GraspNet 的 Nx17 格式，可由 `graspnetAPI.GraspGroup` 读取。before 是 NMS 后、方向/物理筛选前；after 是最终筛选结果（R2H 还包含端点可达性筛选）。空 after 表示全部被排除。
+- 当前实际使用的权重：[checkpoint-rs.tar](../../../src/graspnet-baseline/logs/log_rs/checkpoint-rs.tar)，原文件 12,468,415 字节，保留原路径，可直接被 H2R/R2H 的 checkpoint 解析函数找到。SHA256：`60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868`。仅提交这一份 GraspNet checkpoint，未提交 SAM2/FFS 权重。
+
+在项目根目录激活环境后，可离线叠加查看（不运行交接主程序、不连接机器人）：
+
+```bash
+source activate_handover.bash
+python - <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path('src/graspnetAPI').resolve()))
+import numpy as np
+import open3d as o3d
+from graspnetAPI import GraspGroup
+
+sample = Path('docs/experiments/2026-10-20/h2r_180035_ready_gripper_timeout')
+cloud = o3d.io.read_point_cloud(str(sample / 'pointcloud_full.ply'))
+# 查看筛选前候选时，改成 grasp_before_filter.npy；默认只画前 20 个，避免遮挡。
+grasps = GraspGroup(np.load(sample / 'grasp_after_filter.npy'))
+o3d.visualization.draw_geometries([cloud, *grasps[:20].to_open3d_geometry_list()])
+PY
+```
+
+这些局部点云可用于候选可视化、物理筛选及 GraspNet 点云输入的离线测试；完整复现 FFS 深度重建或 SAM2 分割仍需本地原始双目图像、深度及对应依赖，精选附件不代表完整回放包。
