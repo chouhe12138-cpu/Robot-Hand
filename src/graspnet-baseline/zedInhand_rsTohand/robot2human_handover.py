@@ -1761,7 +1761,7 @@ def save_pointcloud_xyzrgb(points, colors_rgb, out_path):
     o3d.io.write_point_cloud(out_path, pcd)
 
 
-def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera, workspace_mask, gg_before, gg_after, note="robot2human", diagnostics=None):
+def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera, workspace_mask, gg_before, gg_after, note="robot2human", diagnostics=None, force_flips=None):
     if not DEBUG_MODE:
         return None
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1791,7 +1791,7 @@ def save_zed_grasp_capture_bundle(left_rgb, tracking_bgr, depth_mm, disp, camera
     gg_after_array = gg_after.grasp_group_array if len(gg_after) > 0 else np.empty((0, 17), dtype=np.float32)
     np.save(str(save_dir / "grasp_before_filter.npy"), gg_before_array)
     np.save(str(save_dir / "grasp_after_filter.npy"), gg_after_array)
-    save_open3d_compare_images(full_points, full_colors, gg_before_array, gg_after_array, str(save_dir))
+    save_open3d_compare_images(full_points, full_colors, gg_before_array, gg_after_array, str(save_dir), force_flips=force_flips)
 
     filter_info = {
         "timestamp": ts,
@@ -1855,16 +1855,17 @@ def show_open3d_process(points, colors, gg_array, force_flips=None):
     get_open3d_viewer().update(points, colors, gg_array, top_k=1, force_flips=force_flips)
 
 
-def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top_k=1):
+def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top_k=1, force_flips=None):
     cloud = o3d.geometry.PointCloud()
     cloud.points = o3d.utility.Vector3dVector(points)
     cloud.colors = o3d.utility.Vector3dVector(colors)
 
-    gg = GraspGroup(gg_array).nms().sort_by_score()
+    gg = GraspGroup(gg_array) if force_flips is not None else GraspGroup(gg_array).nms().sort_by_score()
     geoms = [cloud]
     if len(gg) > 0:
         show_n = min(len(gg), max(int(top_k), 1))
-        geoms.extend(grasp_meshes(gg[:show_n]))
+        shown_flips = None if force_flips is None else force_flips[:show_n]
+        geoms.extend(grasp_meshes(gg[:show_n], force_flips=shown_flips))
 
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=window_name, width=1280, height=720, visible=False)
@@ -1883,57 +1884,13 @@ def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top
     vis.destroy_window()
 
 
-def save_open3d_compare_images(points, colors, gg_before_array, gg_after_array, save_dir):
+def save_open3d_compare_images(points, colors, gg_before_array, gg_after_array, save_dir, force_flips=None):
     before_path = os.path.join(save_dir, "open3d_before_filter.png")
     after_path = os.path.join(save_dir, "open3d_after_filter.png")
 
     try:
         _render_open3d_snapshot(points, colors, gg_before_array, before_path, "Open3D Before Filter", top_k=20)
-        _render_open3d_snapshot(points, colors, gg_after_array, after_path, "Open3D After Filter", top_k=1)
-
-        img_before = cv2.imread(before_path)
-        img_after = cv2.imread(after_path)
-        if img_before is not None and img_after is not None and img_before.shape == img_after.shape:
-            cv2.imwrite(os.path.join(save_dir, "open3d_filter_compare.png"), cv2.hconcat([img_before, img_after]))
-    except Exception as e:
-        logging.warning(f"Open3D screenshot save failed: {e}")
-
-
-def _render_open3d_snapshot(points, colors, gg_array, out_path, window_name, top_k=1):
-    cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(points)
-    cloud.colors = o3d.utility.Vector3dVector(colors)
-
-    gg = GraspGroup(gg_array).nms().sort_by_score()
-    geoms = [cloud]
-    if len(gg) > 0:
-        show_n = min(len(gg), max(int(top_k), 1))
-        geoms.extend(grasp_meshes(gg[:show_n]))
-
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name=window_name, width=1280, height=720, visible=False)
-    for g in geoms:
-        vis.add_geometry(g)
-
-    ctr = vis.get_view_control()
-    ctr.set_front([0, 0, -1])
-    ctr.set_lookat([0, 0, 0.5])
-    ctr.set_up([0, -1, 0])
-    ctr.set_zoom(0.8)
-
-    vis.poll_events()
-    vis.update_renderer()
-    vis.capture_screen_image(out_path, do_render=True)
-    vis.destroy_window()
-
-
-def save_open3d_compare_images(points, colors, gg_before_array, gg_after_array, save_dir):
-    before_path = os.path.join(save_dir, "open3d_before_filter.png")
-    after_path = os.path.join(save_dir, "open3d_after_filter.png")
-
-    try:
-        _render_open3d_snapshot(points, colors, gg_before_array, before_path, "Open3D Before Filter", top_k=20)
-        _render_open3d_snapshot(points, colors, gg_after_array, after_path, "Open3D After Filter", top_k=1)
+        _render_open3d_snapshot(points, colors, gg_after_array, after_path, "Open3D After Filter", top_k=1, force_flips=force_flips)
 
         img_before = cv2.imread(before_path)
         img_after = cv2.imread(after_path)
@@ -2143,6 +2100,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                                  "selected_symmetry_flips": selected_flips,
                                  "endpoint_rejections": endpoint_rejections,
                                  "lift_height_m": ROS_NODE.motion_settings['post_grasp_lift_height_m']},
+                    force_flips=selected_flips,
                 )
 
                 if selection_cancelled():
