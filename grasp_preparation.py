@@ -10,6 +10,34 @@ import numpy as np
 from robotiq_grasp import filter_grasps
 
 
+def filter_by_camera_direction(
+    grasps, camera_rot_mat, max_tilt_deg, max_closing_forward_cos=None,
+):
+    """Filter by camera-axis approach angle, retaining each task's optional closing-axis rule."""
+    if len(grasps) == 0:
+        return grasps
+    camera_forward_base = camera_rot_mat[:, 2]
+    camera_forward_base = camera_forward_base / (np.linalg.norm(camera_forward_base) + 1e-8)
+    max_tilt_cos = np.cos(np.deg2rad(max_tilt_deg))
+    keep = []
+    for grasp in grasps:
+        rot_mat = grasp.rotation_matrix
+        approach_camera = rot_mat[:, 0]
+        approach_camera = approach_camera / (np.linalg.norm(approach_camera) + 1e-8)
+        approach_base = camera_rot_mat @ approach_camera
+        approach_base = approach_base / (np.linalg.norm(approach_base) + 1e-8)
+        cos_tilt = float(np.clip(np.dot(approach_base, camera_forward_base), -1.0, 1.0))
+        allowed = cos_tilt >= max_tilt_cos
+        if max_closing_forward_cos is not None:
+            closing_camera = rot_mat[:, 1]
+            closing_camera = closing_camera / (np.linalg.norm(closing_camera) + 1e-8)
+            closing_base = camera_rot_mat @ closing_camera
+            closing_base = closing_base / (np.linalg.norm(closing_base) + 1e-8)
+            allowed = allowed and abs(np.dot(closing_base, camera_forward_base)) <= max_closing_forward_cos
+        keep.append(allowed)
+    return grasps[np.asarray(keep, dtype=bool)]
+
+
 def prepare_ready_grasps(
     direction_filtered, scene_points, approach_distance,
     build_plan, validate_plan, cancelled=None, on_rejected=None,
