@@ -2433,6 +2433,10 @@ def main(debug=False, manual=False, all_directions=False):
                     cv2.putText(zed_display, zed_manual_hint, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
                 if STATE == "HANDOVER_SEGMENTATION":
+                    if (prepared_grasp is not None
+                            and time.monotonic() - prepared_grasp[2] > 30.0):
+                        prepared_grasp = None
+                        logging.info("H2R READY expired; prepare the grasp again.")
                     if prepared_grasp is not None:
                         cv2.putText(zed_display, "READY: review grasp then press SPACE",
                                     (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
