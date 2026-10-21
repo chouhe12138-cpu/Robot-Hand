@@ -56,7 +56,7 @@ BASELINE_DIR = ROOT_DIR if os.path.isdir(os.path.join(ROOT_DIR, "models")) else 
 SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
 from robotiq_grasp import grasp_meshes, grasp_tcp_pose
-from grasp_preparation import prepare_ready_grasps, ready_rejection_reason
+from grasp_preparation import prepare_ready_grasps, ready_rejection_reason, filter_by_camera_direction
 from handover_runtime import load_home_joints, move_home
 
 sys.path.append(BASELINE_DIR)
@@ -1570,38 +1570,6 @@ def denoise_points(points, colors):
     return np.asarray(pcd.points, dtype=np.float32), np.asarray(pcd.colors, dtype=np.float32)
 
 
-def filter_grasps_by_camera_direction(gg, camera_rot_mat):
-    if len(gg) == 0:
-        return gg
-
-    camera_forward_base = camera_rot_mat[:, 2]
-    camera_forward_base = camera_forward_base / (np.linalg.norm(camera_forward_base) + 1e-8)
-    max_tilt_cos = math.cos(math.radians(CAMERA_GRASP_MAX_TILT_DEG))
-
-    keep_mask = []
-    for grasp in gg:
-        rot_mat = grasp.rotation_matrix
-        approach_camera = rot_mat[:, 0]
-        closing_camera = rot_mat[:, 1]
-
-        approach_camera = approach_camera / (np.linalg.norm(approach_camera) + 1e-8)
-        closing_camera = closing_camera / (np.linalg.norm(closing_camera) + 1e-8)
-
-        approach_base = camera_rot_mat @ approach_camera
-        closing_base = camera_rot_mat @ closing_camera
-
-        approach_base = approach_base / (np.linalg.norm(approach_base) + 1e-8)
-        closing_base = closing_base / (np.linalg.norm(closing_base) + 1e-8)
-
-        cos_tilt = float(np.clip(np.dot(approach_base, camera_forward_base), -1.0, 1.0))
-        is_within_tilt = cos_tilt >= max_tilt_cos
-        is_not_singular = abs(np.dot(closing_base, camera_forward_base)) <= CAMERA_GRASP_MAX_CLOSING_FORWARD_COS
-        keep_mask.append(is_within_tilt and is_not_singular)
-
-    keep_mask = np.asarray(keep_mask, dtype=bool)
-    return gg[keep_mask]
-
-
 def filter_collision_grasps(gg, scene_points):
     return filter_grasps(gg, scene_points, GRASP_BACKOFF_DIST)
 
@@ -2132,7 +2100,8 @@ def main(debug=False, manual=False, all_directions=False):
                     raise RuntimeError("H2R camera orientation TF unavailable; cannot prepare grasp") from e
 
                 gg_camera = (gg_nms if all_directions
-                             else filter_grasps_by_camera_direction(gg_nms, camera_rot_mat).sort_by_score())
+                             else filter_by_camera_direction(gg_nms, camera_rot_mat, CAMERA_GRASP_MAX_TILT_DEG,
+                                                             CAMERA_GRASP_MAX_CLOSING_FORWARD_COS).sort_by_score())
                 orient_count = len(gg_camera)
                 # Same physical symmetry + endpoint IK screening as R2H.
                 prepared_candidates = prepare_ready_grasps(
