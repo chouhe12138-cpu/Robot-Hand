@@ -2,6 +2,10 @@
 
 更新日期：2026-10-19。本文是当前状态快照；旧过程记录见 [LOCAL_SETUP.md](LOCAL_SETUP.md)。当日晚间已完成抓取 + 20 cm 抬升的真机验证，完整自动交接仍未跑通。
 
+## 2026-10-20 实验进展补充
+
+最新状态与少量实验截图见 [2026-10-20 精选实验记录](docs/experiments/2026-10-20/README.md)。下文 2026-10-19 内容为历史快照；发生冲突时以最新记录及代码为准。
+
 ## 1. 项目目标与当前结论
 
 项目位于 `/home/ros2/Desktop/Robot-Hand/UR3e_Handover-master`，使用 UR3e、Robotiq 2F-85、腕部 ZED 2i 和外部 Intel RealSense D435i，实现桌面抓取及人机交接。

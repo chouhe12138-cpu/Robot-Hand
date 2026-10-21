@@ -1,0 +1,59 @@
+{
+  "timestamp": "20261020_155252",
+  "note": "robot2human",
+  "raw_count": 33,
+  "selected_count": 0,
+  "image_size": {
+    "width": 640,
+    "height": 360
+  },
+  "network_raw_count": 1024,
+  "nms_count": 33,
+  "direction_count": 14,
+  "all_directions": false,
+  "physical_orientation_count": 8,
+  "selected_symmetry_flips": [],
+  "endpoint_rejections": [
+    {
+      "candidate": 0,
+      "force_flip": false,
+      "reason": "approach: no IK solution; xyz=[0.16753598416905596, -0.5475574510191522, -0.022957047379281975]"
+    },
+    {
+      "candidate": 1,
+      "force_flip": true,
+      "reason": "approach: no IK solution; xyz=[0.16828587322947394, -0.5475446933242614, -0.022955279839582968]"
+    },
+    {
+      "candidate": 2,
+      "force_flip": false,
+      "reason": "approach: no IK solution; xyz=[0.12168669732298387, -0.5275343906962537, -0.025739625059525068]"
+    },
+    {
+      "candidate": 3,
+      "force_flip": true,
+      "reason": "approach: no IK solution; xyz=[0.12201613559061857, -0.5282076300428618, -0.02576643356389663]"
+    },
+    {
+      "candidate": 4,
+      "force_flip": false,
+      "reason": "approach: no IK solution; xyz=[0.2369658387072219, -0.5166299397181826, -0.021031771406272756]"
+    },
+    {
+      "candidate": 5,
+      "force_flip": true,
+      "reason": "approach: no IK solution; xyz=[0.23717804739546494, -0.5159111962568561, -0.021002194466866256]"
+    },
+    {
+      "candidate": 6,
+      "force_flip": false,
+      "reason": "approach: no IK solution; xyz=[0.1660256124169272, -0.5330026248011319, -0.03581101540883236]"
+    },
+    {
+      "candidate": 7,
+      "force_flip": true,
+      "reason": "approach: no IK solution; xyz=[0.16609169002983049, -0.5336438035690276, -0.036194451221691196]"
+    }
+  ],
+  "lift_height_m": 0.2
+}

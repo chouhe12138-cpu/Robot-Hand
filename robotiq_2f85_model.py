@@ -198,7 +198,7 @@ class Robotiq85:
         result.append(('ur_to_robotiq_adapter', vertices, self.adapter_equations, self.T_tcp_adapter))
         return result
 
-    def grasp_tcp_pose(self, grasp, T_world_camera, current_rotation):
+    def grasp_tcp_pose(self, grasp, T_world_camera, current_rotation, force_flip=None):
         """Map MODEL contact reference to real pads, then to unchanged active TCP.
 
         GraspNet fingers span approach coordinates [depth-.06, depth]. Their
@@ -216,7 +216,7 @@ class Robotiq85:
         center = center+(float(grasp.depth)-self.config['graspnet_finger_length_m']/2)*z
         options = []
         T_base_tcp = np.linalg.inv(self.T_tool0_base)@self.T_tool0_tcp
-        for flip in (False, True):
+        for flip in ((False, True) if force_flip is None else (force_flip,)):
             orient = primary@np.diag([-1., -1., 1.]) if flip else primary
             base = rigid(center-orient@reference, orient)
             tcp = base@T_base_tcp

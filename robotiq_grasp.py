@@ -23,22 +23,20 @@ def gripper_model():
     return _models.gripper
 
 
-def grasp_tcp_pose(grasp, camera_transform, current_rotation):
-    return gripper_model().grasp_tcp_pose(grasp, camera_transform, current_rotation)
+def grasp_tcp_pose(grasp, camera_transform, current_rotation, force_flip=None):
+    return gripper_model().grasp_tcp_pose(grasp, camera_transform, current_rotation, force_flip=force_flip)
 
 
-def filter_grasps(grasps, scene_points, approach_distance, max_candidates=120):
-    """Check real links while approaching open and closing to predicted width.
+def filter_grasps(grasps, scene_points, approach_distance, max_candidates=120, return_flips=False):
+    """Check real gripper collision. Return valid 180-degree symmetries separately when requested.
 
-    Both parallel-jaw orientations must clear the observed scene, so execution
-    can retain its nearest-orientation choice. These sampled checks do not
-    certify the arm path or obstacles absent from the camera point cloud.
+    The returned flip is part of the grasp plan and must also be used for IK.
+    Default preserves the legacy both-orientations-required screening.
     """
     model = gripper_model()
     model.set_scene(scene_points)
-    keep = []
-    width_rejected = 0
-    clearance_rejected = 0
+    keep, flips = [], []
+    width_rejected = clearance_rejected = 0
     minimum_width = max(0., model.opening(model.closed))
     maximum_width = min(model.config['maximum_opening_m'], model.opening(0.))
     for index, grasp in enumerate(grasps[:max_candidates]):
@@ -46,32 +44,33 @@ def filter_grasps(grasps, scene_points, approach_distance, max_candidates=120):
             width_rejected += 1
             continue
         angle = model.angle_for_opening(float(grasp.width))
-        primary = np.column_stack([grasp.rotation_matrix[:, 1],
-                                   grasp.rotation_matrix[:, 2],
-                                   grasp.rotation_matrix[:, 0]])
-        clear = True
-        for rotation in (primary, primary @ np.diag([-1., -1., 1.])):
-            pose = model.grasp_tcp_pose(grasp, np.eye(4), rotation)
+        valid_flips = []
+        for flip in (False, True):
+            pose = model.grasp_tcp_pose(grasp, np.eye(4), np.eye(3), force_flip=flip)
             if not model.screen_closure(pose, 0., angle)['ok']:
-                clear = False
-                break
+                continue
             direction = Rotation.from_rotvec(pose[3:]).as_matrix()[:, 2]
             for distance in np.linspace(0., approach_distance, 5):
                 approach = pose.copy()
                 approach[:3] -= distance * direction
                 if not model.screen(approach, 0.)['ok']:
-                    clear = False
                     break
-            if not clear:
-                break
-        if clear:
+            else:
+                valid_flips.append(flip)
+        if return_flips:
+            for flip in valid_flips:
+                keep.append(index)
+                flips.append(flip)
+            if not valid_flips:
+                clearance_rejected += 1
+        elif len(valid_flips) == 2:
             keep.append(index)
         else:
             clearance_rejected += 1
-    logging.info(
-        "2F-85 filter: kept=%d, width_rejected=%d, clearance_rejected=%d",
-        len(keep), width_rejected, clearance_rejected)
-    return grasps[np.asarray(keep, dtype=int)]
+    logging.info("2F-85 filter: kept=%d, width_rejected=%d, clearance_rejected=%d",
+                 len(keep), width_rejected, clearance_rejected)
+    selected = grasps[np.asarray(keep, dtype=int)]
+    return (selected, flips) if return_flips else selected
 
 
 @lru_cache(maxsize=128)
@@ -91,19 +90,20 @@ def _local_meshes(angle):
     return meshes
 
 
-def grasp_meshes(grasps):
+def grasp_meshes(grasps, force_flips=None):
     """Render the same physical geometry and contact mapping used for screening."""
     from copy import deepcopy
     model = gripper_model()
     result = []
     maximum = min(model.config['maximum_opening_m'], model.opening(0.))
     minimum = max(0., model.opening(model.closed))
-    for grasp in grasps:
+    for index, grasp in enumerate(grasps):
         # Raw debug predictions can exceed the physical stroke. Omit those.
         if not minimum <= grasp.width <= maximum:
             continue
         angle = model.angle_for_opening(float(grasp.width))
-        pose = model.grasp_tcp_pose(grasp, np.eye(4), np.eye(3))
+        flip = None if force_flips is None else force_flips[index]
+        pose = model.grasp_tcp_pose(grasp, np.eye(4), np.eye(3), force_flip=flip)
         transform = pose_matrix(pose)
         for source in _local_meshes(angle):
             mesh = deepcopy(source)
