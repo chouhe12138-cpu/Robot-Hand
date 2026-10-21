@@ -55,7 +55,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASELINE_DIR = ROOT_DIR if os.path.isdir(os.path.join(ROOT_DIR, "models")) else os.path.dirname(ROOT_DIR)
 SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
-from robotiq_grasp import grasp_meshes, grasp_tcp_pose
+from robotiq_grasp import grasp_meshes, grasp_tcp_pose, filter_grasps
 from grasp_preparation import prepare_ready_grasps, ready_rejection_reason, filter_by_camera_direction
 from handover_runtime import load_home_joints, move_home
 
