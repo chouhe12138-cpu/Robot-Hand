@@ -57,7 +57,7 @@ BASELINE_DIR = os.path.dirname(ROOT_DIR)
 SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
 from robotiq_grasp import grasp_meshes, grasp_tcp_pose
-from grasp_preparation import prepare_ready_grasps, ready_rejection_reason
+from grasp_preparation import prepare_ready_grasps, ready_rejection_reason, filter_by_camera_direction
 from handover_runtime import load_home_joints, move_home, load_motion_settings, post_grasp_lift_pose
 sys.path.append(os.path.join(BASELINE_DIR, 'models'))
 sys.path.append(os.path.join(BASELINE_DIR, 'dataset'))
@@ -1529,31 +1529,6 @@ def estimate_workspace_normal_from_points(scene_points):
         normal = -normal
     return normal
 
-def filter_grasps_by_camera_direction(gg, camera_rot_mat):
-    if len(gg) == 0:
-        return gg
-
-    camera_forward_base = camera_rot_mat[:, 2]
-    camera_forward_base = camera_forward_base / (np.linalg.norm(camera_forward_base) + 1e-8)
-    max_tilt_cos = math.cos(math.radians(CAMERA_GRASP_MAX_TILT_DEG))
-
-    keep_mask = []
-    for grasp in gg:
-        rot_mat = grasp.rotation_matrix
-        approach_camera = rot_mat[:, 0]
-
-        approach_camera = approach_camera / (np.linalg.norm(approach_camera) + 1e-8)
-        approach_base = camera_rot_mat @ approach_camera
-
-        approach_base = approach_base / (np.linalg.norm(approach_base) + 1e-8)
-
-        cos_tilt = float(np.clip(np.dot(approach_base, camera_forward_base), -1.0, 1.0))
-        keep_mask.append(cos_tilt >= max_tilt_cos)
-
-    keep_mask = np.asarray(keep_mask, dtype=bool)
-    return gg[keep_mask]
-
-
 def select_physical_hand(results, mp_label):
     if not results.multi_hand_landmarks or not results.multi_handedness:
         return None, None
@@ -2058,7 +2033,7 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                     raise RuntimeError("Camera orientation TF unavailable; cannot prepare grasp") from e
 
                 # Wider directions require explicit opt-in, never bypass physical/IK checks.
-                gg_camera = gg_nms if all_directions else filter_grasps_by_camera_direction(gg_nms, camera_rot_mat).sort_by_score()
+                gg_camera = gg_nms if all_directions else filter_by_camera_direction(gg_nms, camera_rot_mat, CAMERA_GRASP_MAX_TILT_DEG).sort_by_score()
                 orient_count = len(gg_camera)
                 # Shared R2H/H2R selection: one validated plan per physical symmetry.
                 def log_endpoint_rejection(index, flip, error):
