@@ -57,7 +57,9 @@ SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
 from robotiq_grasp import grasp_meshes, grasp_tcp_pose, filter_grasps
 from grasp_preparation import prepare_ready_grasps, ready_rejection_reason, filter_by_camera_direction
-from handover_runtime import load_home_joints, move_home
+from h2r_interaction import FistConfirmation, unique_hand, hands_separated, segmentation_rejection_reason, manual_segmentation_prompts
+from camera_view import create_camera_view, draw_handover_hint, draw_physical_hand
+from handover_runtime import load_home_joints, move_home, load_motion_settings
 
 sys.path.append(BASELINE_DIR)
 sys.path.append(os.path.join(BASELINE_DIR, 'models'))
@@ -104,25 +106,15 @@ hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_c
 mp_drawing = mp.solutions.drawing_utils
 PHYSICAL_RIGHT_HAND_MP_LABEL = "Left"
 PHYSICAL_LEFT_HAND_MP_LABEL = "Right"
-HANDOVER_DEFAULT_BASE_YAW = math.radians(100)
-HANDOVER_JOINT_SHAPE = [
-    HANDOVER_DEFAULT_BASE_YAW,
-    math.radians(45),
-    math.radians(-95),
-    math.radians(-130),
-    math.radians(-90),
-    math.radians(0),
-]
 HANDOVER_LEFT_HAND_TIMEOUT = 5.0
 HANDOVER_LEFT_HAND_MAX_AGE = 3.0
-FOLLOW_LEFT_HAND_DISTANCE = 0.15
-FOLLOW_LEFT_HAND_Z_OFFSET = 0.00
 FOLLOW_MOVE_SPEED = 0.05
 FOLLOW_MOVE_ACCEL = 0.05
 FOLLOW_MAX_XY_STEP = 0.03
 FOLLOW_MAX_Z_STEP = 0.02
 WORKSPACE_OBSERVE_BASE_OFFSET = 0.10
 WORKSPACE_OBSERVE_HEIGHT = 0.30
+HANDOVER_OBSERVE_HEIGHT = 0.20  # TCP height above the palm; workspace floor still applies.
 WORKSPACE_RELEASE_HEIGHT = 0.10
 SAM2_SETTLE_SECONDS = 1.0
 DEBUG_MODE = False
@@ -282,9 +274,11 @@ class RobotControllerNode(Node):
         self.left_hand_seen_time = 0.0
         self.left_hand_lock = threading.Lock()
         self.handover_follow_pose = None
-        self.handover_follow_z_offset = None
+        self.hand_observation_error = ""
         self.zed_selection_mode_callback = None
         self.motion_failed = threading.Event()
+        self.home_revision = 0
+        self.gripper_force = load_motion_settings()["gripper_force_N"]
         self.motion_lock = threading.Lock()
         self.motion_error = ""
         self.recovery_pending = False
@@ -398,14 +392,14 @@ class RobotControllerNode(Node):
         self.get_logger().info("Moving to workspace observation with checked joint motion")
         self.move_joint(joints.tolist(), .30, .30)
 
-    def send_gripper_command(self, position, speed=0.15, force=140.0):
+    def send_gripper_command(self, position, speed=0.15, force=None):
         self.ensure_motion_ready()
         if not self._action_client.wait_for_server(timeout_sec=3.0):
             self.get_logger().error("Gripper action server unavailable")
             return False
         goal_msg = GripperCommand.Goal()
         goal_msg.command.position = position
-        goal_msg.command.max_effort = force
+        goal_msg.command.max_effort = self.gripper_force if force is None else force
         goal_msg.command.max_speed = speed
         deadline = time.monotonic() + 8.0
         future = self._action_client.send_goal_async(goal_msg)
@@ -457,11 +451,14 @@ class RobotControllerNode(Node):
             # Recheck the robot after waiting for the independent gripper service.
             self.ensure_motion_ready()
             move_home(self.rtde_c, self.rtde_r, load_home_joints())
+            if not self.send_gripper_command(.085):
+                raise RuntimeError("Home reached but gripper opening was not confirmed")
             self.motion_error = ""
             self.handover_follow_pose = None
             with self.left_hand_lock:
                 self.left_hand_base_pos = None
                 self.left_hand_seen_time = 0.0
+            self.home_revision += 1
             STATE = "IDLE"
             self.get_logger().info("Home reached. Select workspace for a new round.")
             return True
@@ -499,115 +496,74 @@ class RobotControllerNode(Node):
             time.sleep(0.05)
         return None
 
-    def get_handover_default_tcp_xy(self):
-        try:
-            self.ensure_motion_ready()
-            default_tcp_pose = self.rtde_c.getForwardKinematics(HANDOVER_JOINT_SHAPE)
-            return np.array(default_tcp_pose[:2], dtype=float)
-        except Exception as e:
-            self.hold_motion_error(e)
-            raise
+    def build_follow_left_hand_pose(self, hand_base_pos, limit_step=True):
+        """Observe from above using the workspace view, not a same-height folded pose.
 
-    def build_handover_joint_q(self, hand_base_pos):
-        handover_joint_q = HANDOVER_JOINT_SHAPE.copy()
-        if hand_base_pos is None:
-            self.get_logger().warning("Left hand direction unavailable; skip moving to default handover pose.")
-            return None
+        Height/offset are observation targets, not collision-clearance guarantees.
+        Raise before translating when below the requested observation height.
+        """
+        hand = np.asarray(hand_base_pos, dtype=float)
+        if hand.shape != (3,) or not np.all(np.isfinite(hand)):
+            raise ValueError("Invalid left-hand position for overhead observation")
+        reference = self.handover_follow_pose or self.dynamic_start_pose
+        if self.dynamic_start_pose is None or reference is None:
+            raise RuntimeError("Workspace overhead observation reference is missing")
+        rotation = R.from_rotvec(reference[3:]).as_matrix()
+        if rotation[2, 2] > -0.99:
+            raise RuntimeError("H2R observation reference must keep the tool pointing down")
 
-        hand_controller_xy = np.array([-hand_base_pos[0], -hand_base_pos[1]], dtype=float)
-        hand_xy_norm = np.linalg.norm(hand_controller_xy)
-        if hand_xy_norm < 1e-4:
-            self.get_logger().warning("Left hand XY direction is too small; waiting for a stable left hand direction.")
-            return None
+        current = np.asarray(self.rtde_r.getActualTCPPose(), dtype=float)
+        hand_xy = hand[:2]
+        radius = np.linalg.norm(hand_xy)
+        observe_xy = hand_xy.copy()
+        if radius >= 1e-5:
+            observe_xy -= hand_xy / radius * WORKSPACE_OBSERVE_BASE_OFFSET
+        target_xy = -observe_xy  # ROS base_link -> controller base XY.
+        # Never follow a low hand below the selected workspace observation plane.
+        observe_z = max(float(hand[2]) + HANDOVER_OBSERVE_HEIGHT,
+                        float(self.dynamic_start_pose[2]))
+        if not limit_step:
+            return [*target_xy.tolist(), observe_z, *reference[3:]]
+        target_z = current[2] + np.clip(observe_z - current[2],
+                                      -FOLLOW_MAX_Z_STEP, FOLLOW_MAX_Z_STEP)
+        delta_xy = target_xy - current[:2]
+        distance_xy = np.linalg.norm(delta_xy)
+        if distance_xy > FOLLOW_MAX_XY_STEP:
+            target_xy = current[:2] + delta_xy / distance_xy * FOLLOW_MAX_XY_STEP
+        # Match the existing 5 mm endpoint tolerance: prioritize the upward leg.
+        if observe_z - current[2] > .005:
+            target_xy = current[:2].copy()
+        return [*target_xy.tolist(), float(target_z), *reference[3:]]
 
-        default_tcp_xy = self.get_handover_default_tcp_xy()
-        if default_tcp_xy is None or np.linalg.norm(default_tcp_xy) < 1e-4:
-            default_xy_angle = 0.0
-        else:
-            default_xy_angle = math.atan2(default_tcp_xy[1], default_tcp_xy[0])
-
-        hand_xy_angle = math.atan2(hand_controller_xy[1], hand_controller_xy[0])
-        yaw_delta = math.atan2(math.sin(hand_xy_angle - default_xy_angle), math.cos(hand_xy_angle - default_xy_angle))
-        base_yaw = HANDOVER_DEFAULT_BASE_YAW + yaw_delta
-        base_yaw = math.atan2(math.sin(base_yaw), math.cos(base_yaw))
-        handover_joint_q[0] = base_yaw
-        self.get_logger().info(
-            f"Physical left hand direction set handover base yaw to {math.degrees(base_yaw):.1f} deg "
-            f"(delta {math.degrees(yaw_delta):.1f} deg)."
-        )
-        return handover_joint_q
-
-    def wait_for_handover_joint_q(self, timeout=HANDOVER_LEFT_HAND_TIMEOUT, retry_sleep=0.1):
-        with self.left_hand_lock:
-            self.left_hand_base_pos = None
-            self.left_hand_seen_time = 0.0
-        while True:
-            self.ensure_motion_ready()
-            hand_base_pos = self.wait_for_left_hand_base_pos(timeout=timeout)
-            if hand_base_pos is None:
-                self.get_logger().info("Left hand not detected yet, keep waiting before moving to handover observation pose...")
-                continue
-
-            handover_joint_q = self.build_handover_joint_q(hand_base_pos)
-            if handover_joint_q is not None:
-                return handover_joint_q
-            time.sleep(retry_sleep)
-
-    def get_handover_orientation_for_hand(self, hand_base_pos):
-        handover_joint_q = self.build_handover_joint_q(hand_base_pos)
-        try:
-            facing_tcp_pose = self.rtde_c.getForwardKinematics(handover_joint_q)
-            return facing_tcp_pose[3], facing_tcp_pose[4], facing_tcp_pose[5]
-        except Exception as e:
-            self.hold_motion_error(e)
-            raise
-
-    def build_follow_left_hand_pose(self, hand_base_pos):
-        if self.handover_follow_pose is None:
-            self.handover_follow_pose = list(self.rtde_r.getActualTCPPose())
-        if self.handover_follow_z_offset is None:
-            self.handover_follow_z_offset = FOLLOW_LEFT_HAND_Z_OFFSET
-
-        current_tcp_pose = self.rtde_r.getActualTCPPose()
-        current_controller_xy = np.array(current_tcp_pose[:2], dtype=float)
-        hand_base_xy = np.array(hand_base_pos[:2], dtype=float)
-        hand_norm = np.linalg.norm(hand_base_xy)
-        if hand_norm < 1e-4:
-            hand_dir = np.array([1.0, 0.0], dtype=float)
-        else:
-            hand_dir = hand_base_xy / hand_norm
-
-        follow_base_xy = hand_base_xy - hand_dir * FOLLOW_LEFT_HAND_DISTANCE
-        target_controller_xy = np.array([-follow_base_xy[0], -follow_base_xy[1]], dtype=float)
-        delta_xy = target_controller_xy - current_controller_xy
-        delta_norm = np.linalg.norm(delta_xy)
-        if delta_norm > FOLLOW_MAX_XY_STEP:
-            target_controller_xy = current_controller_xy + delta_xy / delta_norm * FOLLOW_MAX_XY_STEP
-
-        current_z = float(current_tcp_pose[2])
-        target_z = float(hand_base_pos[2]) + float(self.handover_follow_z_offset)
-        delta_z = target_z - current_z
-        if abs(delta_z) > FOLLOW_MAX_Z_STEP:
-            target_z = current_z + math.copysign(FOLLOW_MAX_Z_STEP, delta_z)
-
-        rx, ry, rz = self.handover_follow_pose[3], self.handover_follow_pose[4], self.handover_follow_pose[5]
-        return [
-            target_controller_xy[0],
-            target_controller_xy[1],
-            target_z,
-            rx,
-            ry,
-            rz,
-        ]
+    def hand_observation_rejection_reason(self, hand_base_pos):
+        """Read-only endpoint preview shared by the READY UI and actual guidance."""
+        self.ensure_motion_ready()
+        goal = self.build_follow_left_hand_pose(hand_base_pos, limit_step=False)
+        seed = self.rtde_r.getActualQ()
+        if not self.rtde_c.getInverseKinematicsHasSolution(goal, seed):
+            return "Overhead view unreachable: reposition LEFT hand"
+        joints = self.rtde_c.getInverseKinematics(goal, seed)
+        if (len(joints) != 6 or not np.all(np.isfinite(joints))
+                or not self.rtde_c.isPoseWithinSafetyLimits(goal)
+                or not self.rtde_c.isJointsWithinSafetyLimits(joints)):
+            return "Overhead view rejected by controller limits: reposition LEFT hand"
+        return None
 
     def follow_left_hand(self, hand_base_pos):
-        if not self.rtde_c:
-            self.get_logger().error("RTDE not connected.")
-            return
-
+        self.ensure_motion_ready()
+        # Check the full overhead target before issuing even the first lift step.
+        # An unreachable hand must not cause a fallback to the former low view.
+        error = self.hand_observation_rejection_reason(hand_base_pos)
+        if error:
+            if error != self.hand_observation_error:
+                self.get_logger().warning(error)
+            self.hand_observation_error = error
+            return False
+        self.hand_observation_error = ""
         follow_pose = self.build_follow_left_hand_pose(hand_base_pos)
-        self.get_logger().info(f"Following physical left hand at fixed handover orientation: {follow_pose}")
+        self.get_logger().info(f"Observing physical left hand from above (workspace orientation): {follow_pose}")
         self.move_linear(follow_pose, FOLLOW_MOVE_SPEED, FOLLOW_MOVE_ACCEL)
+        return True
 
     def build_grasp_plan(self, grasp, force_flip=None):
         """Convert the selected and collision-checked gripper orientation into TCP poses."""
@@ -693,46 +649,19 @@ class RobotControllerNode(Node):
             self.get_logger().info("Moving back to approach pose...")
             self.move_linear(approach_pose, 0.05, 0.05)
             
-            try:
-                current_q = self.rtde_r.getActualQ()
-                downward_q = [current_q[0], -math.pi/2, math.pi/2, -math.pi/2, -math.pi/2, 0.0]
-                self.get_logger().info(f"Returning to downward gripper joint shape: {downward_q}")
-                self.move_joint(downward_q, 0.15, 0.15)
-            except Exception as e:
-                raise RuntimeError("Failed to return to downward gripper pose") from e
-
-            workspace_place_pose = self.dynamic_start_pose if self.dynamic_start_pose else self.dynamic_workspace_center_pose
-            if workspace_place_pose:
-                workspace_observe_pose = list(workspace_place_pose)
-                workspace_release_pose = list(workspace_place_pose)
-                workspace_release_pose[2] -= WORKSPACE_OBSERVE_HEIGHT - WORKSPACE_RELEASE_HEIGHT
-
-                self.get_logger().info("Moving to workspace pose 50cm above the table...")
-                self.move_linear(workspace_observe_pose, 0.15, 0.15)
-                self.get_logger().info("Lowering to workspace pose 10cm above the table...")
-                self.move_linear(workspace_release_pose, 0.10, 0.10)
-                self.get_logger().info("Releasing object on workspace...")
-                if not self.send_gripper_command(0.085):
-                    raise RuntimeError("Gripper open failed")
-                time.sleep(0.3)
-                self.get_logger().info("Returning to workspace pose 30cm above the table...")
-                self.move_linear(workspace_observe_pose, 0.15, 0.15)
-            else:
-                self.get_logger().warning("Workspace center pose unavailable, keeping current safe pose.")
-                if not self.send_gripper_command(0.085):
-                    raise RuntimeError("Gripper open failed")
-
+            # Retire the folded-pose/workspace-place route. Release only after Home.
+            # Use the existing Home configuration and checked joint-motion wrapper.
             global STATE
-            next_mode = None
-            if callable(self.zed_selection_mode_callback):
-                next_mode = self.zed_selection_mode_callback()
-            if next_mode in ("mllm", "manual"):
-                self.get_logger().info(f"ZED hand/object selection mode for the next round: {next_mode}")
-            else:
-                self.get_logger().warning("Next-round ZED selection mode was not updated; keeping previous mode.")
-            STATE = "WAITING_HANDOVER_START_POSE"
-            self.get_logger().info("Next round ready. Show LEFT hand, then press SPACE to start tracking.")
-                
+            STATE = "RETURNING_HOME"
+            self.get_logger().info("Object received and retreated. Returning Home before releasing the object...")
+            self.move_joint(load_home_joints(), 0.30, 0.30)
+            if not self.send_gripper_command(.085):
+                raise RuntimeError("Home reached but gripper release was not confirmed")
+            self.handover_follow_pose = None
+            STATE = "HOME_READY"
+            self.home_revision += 1
+            self.get_logger().info("Home reached; gripper open. Resetting selection for the next round.")
+
         except Exception as e:
             self.hold_motion_error(e)
 
@@ -960,7 +889,6 @@ zed_drawing = False
 zed_ix, zed_iy, zed_fx_mouse, zed_fy_mouse = -1, -1, -1, -1
 zed_pending_bbox = None
 zed_pending_point = None
-zed_mouse_selection_pending = False
 
 rs_selection_locked = False
 
@@ -995,16 +923,11 @@ def mouse_callback(event, x, y, flags, param):
 
 def zed_mouse_callback(event, x, y, flags, param):
     global zed_drawing, zed_ix, zed_iy, zed_fx_mouse, zed_fy_mouse, zed_pending_bbox, zed_pending_point
-    global STATE, zed_mouse_selection_pending
 
-    if STATE in ("FOLLOWING_HAND", "WAITING_DELIVERY") and event == cv2.EVENT_LBUTTONDOWN:
-        STATE = "HANDOVER_SELECTION_PENDING"
-        zed_mouse_selection_pending = True
-        logging.info("ZED mouse selection requested. Stopping further hand tracking.")
-    if STATE != "HANDOVER_SEGMENTATION" and not (
-            STATE == "HANDOVER_SELECTION_PENDING" and zed_mouse_selection_pending):
+    if STATE != "HANDOVER_SEGMENTATION":
+        zed_drawing = False
         if event == cv2.EVENT_LBUTTONDOWN:
-            logging.warning("ZED selection inactive: press SPACE at the handover position, then select hand and object.")
+            logging.info("ZED selection locked: finish positioning with RIGHT fist 2s, then select the object in segmentation stage.")
         return
     if event == cv2.EVENT_LBUTTONDOWN:
         zed_drawing = True
@@ -1014,6 +937,8 @@ def zed_mouse_callback(event, x, y, flags, param):
         if zed_drawing:
             zed_fx_mouse, zed_fy_mouse = x, y
     elif event == cv2.EVENT_LBUTTONUP:
+        if not zed_drawing:
+            return
         zed_drawing = False
         zed_fx_mouse, zed_fy_mouse = x, y
         dx = abs(zed_fx_mouse - zed_ix)
@@ -1027,17 +952,8 @@ def zed_mouse_callback(event, x, y, flags, param):
 
 
 def select_physical_hand(results, mp_label):
-    if not results.multi_hand_landmarks or not results.multi_handedness:
-        return None, None
+    return unique_hand(results, mp_label)
 
-    for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-        if not handedness.classification:
-            continue
-        hand_cls = handedness.classification[0]
-        if hand_cls.label == mp_label:
-            return hand_landmarks, hand_cls.score
-
-    return None, None
 
 def select_right_hand(results):
     return select_physical_hand(results, PHYSICAL_RIGHT_HAND_MP_LABEL)
@@ -1059,6 +975,15 @@ def is_fist(hand_landmarks):
         < landmark_dist2d(hand_landmarks.landmark[mcp_idx], wrist_lm) * 1.2
     )
     return curled_count == 4
+
+def is_open_palm(hand_landmarks):
+    wrist = hand_landmarks.landmark[0]
+    return all(
+        landmark_dist2d(hand_landmarks.landmark[tip], wrist)
+        > landmark_dist2d(hand_landmarks.landmark[mcp], wrist) * 1.5
+        for tip, mcp in zip((8, 12, 16, 20), (5, 9, 13, 17))
+    )
+
 
 def is_thumbs_up(hand_landmarks):
     lm = hand_landmarks.landmark
@@ -1381,11 +1306,17 @@ def save_hand_object_bbox_artifacts(image_bgr, targets, prefix="handover_vlm"):
     for target in targets:
         tid = int(target.get("id", -1))
         label = str(target.get("label", f"id_{tid}"))
-        x1, y1, x2, y2 = map(int, target.get("bbox", (0, 0, 0, 0)))
-        payload["targets"].append({"id": tid, "label": label, "bbox_xyxy": [x1, y1, x2, y2]})
-
+        entry = {"id": tid, "label": label}
         color = (0, 255, 0) if tid == 2 else (255, 0, 0)
-        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+        if "bbox" in target:
+            x1, y1, x2, y2 = map(int, target["bbox"])
+            entry["bbox_xyxy"] = [x1, y1, x2, y2]
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+        else:
+            x1, y1 = map(int, target["point"])
+            entry["point_xy"] = [x1, y1]
+            cv2.circle(vis, (x1, y1), 6, color, 2)
+        payload["targets"].append(entry)
         cv2.putText(vis, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     with open(json_path, "w", encoding="utf-8") as f:
@@ -1710,7 +1641,7 @@ def legacy_realsense_main():
             fps = 1.0 / (t1 - t0)
             cv2.putText(display, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            status = f"Targets: {num_targets} | v=Seg | SPACE=GraspNet | r=Reset | q=Quit"
+            status = f"Targets: {num_targets} | v=Seg | SPACE=GraspNet | r=Reset | ESC=Exit"
             cv2.putText(display, status, (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
             cv2.imshow("Realsense Viewer", display)
@@ -1929,7 +1860,6 @@ def main(debug=False, manual=False, all_directions=False):
     global need_reset, num_targets, pending_bbox, pending_point, current_masks, all_prompts, drawing, ix, iy, fx_mouse, fy_mouse
     global vlm_running, doubao_trigger, workspace_bbox, pending_targets, ROS_NODE, STATE, rs_selection_locked
     global zed_drawing, zed_ix, zed_iy, zed_fx_mouse, zed_fy_mouse, zed_pending_bbox, zed_pending_point
-    global zed_mouse_selection_pending
 
     rclpy.init()
     ROS_NODE = RobotControllerNode()
@@ -1939,9 +1869,11 @@ def main(debug=False, manual=False, all_directions=False):
     t_ros = threading.Thread(target=executor.spin, daemon=True)
     t_ros.start()
 
-    ROS_NODE.get_logger().info("Startup: returning to shared Home without a gripper action...")
+    ROS_NODE.get_logger().info("Startup: returning to shared Home, then opening the gripper...")
     move_home(ROS_NODE.rtde_c, ROS_NODE.rtde_r, load_home_joints())
-    ROS_NODE.get_logger().info("Home reached; starting camera streams.")
+    if not ROS_NODE.send_gripper_command(.085):
+        raise RuntimeError("Startup Home reached but gripper opening was not confirmed")
+    ROS_NODE.get_logger().info("Home reached, gripper open; starting camera streams.")
 
     SAM2_CHECKPOINT = os.path.join(SAM2_DIR, "checkpoints/sam2.1/sam2.1_hiera_small.pt")
     SAM2_CFG = "sam2.1/sam2.1_hiera_s.yaml"
@@ -1963,21 +1895,19 @@ def main(debug=False, manual=False, all_directions=False):
     image_left = sl.Mat()
     image_right = sl.Mat()
 
-    cv2.namedWindow("Realsense Viewer", cv2.WINDOW_AUTOSIZE)
-    cv2.setMouseCallback("Realsense Viewer", mouse_callback)
-    cv2.namedWindow("ZED Inhand Viewer", cv2.WINDOW_AUTOSIZE)
-    cv2.setMouseCallback("ZED Inhand Viewer", zed_mouse_callback)
+    show_realsense = create_camera_view("Realsense Viewer", 960, 720, mouse_callback)
+    show_zed = create_camera_view("ZED Inhand Viewer", 960, 540, zed_mouse_callback)
 
 
     logging.info("Camera Started. UI Controls (focus on OpenCV window):")
     logging.info("  - w: Trigger Doubao to detect Workpace")
     logging.info("  - Left-click drag: Draw object bounding box -> track")
     logging.info("  - Left-click: Select foreground object point -> track")
-    logging.info("  - v: Trigger ZED hand/object segmentation (mode asked after workspace)")
-    logging.info("  - SPACE while following: select left hand/object; SPACE after selection: prepare; SPACE at READY: execute")
-    logging.info("  - 0: release and return Home when idle; failures attempt Home without releasing")
+    logging.info("  - v: Reselect ZED hand/object only within segmentation stage")
+    logging.info("  - RIGHT open palm then fist 2s: start tracking / stop tracking / confirm READY; SPACE disabled")
+    logging.info("  - 0: explicitly release and return Home when idle; check terminal on failure")
     logging.info("  - r: Reset current selection")
-    logging.info("  - q: Quit")
+    logging.info("  - ESC: Stop and exit without releasing or returning Home (q also exits)")
     
     num_targets = 0 
     rs_selection_locked = False
@@ -2008,6 +1938,51 @@ def main(debug=False, manual=False, all_directions=False):
     last_rs_frame_time = 0.0
     recovery_running = False
     release_on_recovery = False
+    preparation_revision = 0
+    fist_confirmation = FistConfirmation()
+    # Separate detector: do not mix temporal tracking between the two cameras.
+    zed_hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
+                               min_detection_confidence=0.7, min_tracking_confidence=0.5)
+    zed_left_available = False
+    zed_left_since = None
+    zed_left_center = None
+    zed_hand_checked_at = 0.0
+    last_mask_time = 0.0
+    grasp_status = "Select the object after the LEFT hand is identified"
+    grasp_snapshot_bgr = None
+    observation_preview = None
+    observation_preview_running = False
+    observation_preview_started = 0.0
+    observation_preview_revision = 0
+    seen_home_revision = ROS_NODE.home_revision
+
+    def reset_workspace_selection():
+        """Clear round UI state on the main thread, as R2H does after Home."""
+        global STATE, workspace_bbox, pending_bbox, pending_point, rs_selection_locked
+        global drawing, need_reset, num_targets, current_masks, all_prompts, pending_targets
+        global zed_pending_bbox, zed_pending_point, zed_drawing
+        nonlocal prepared_grasp, preparation_revision, zed_need_reset
+        nonlocal zed_pending_targets, zed_grasp_request_pending, zed_doubao_trigger
+        nonlocal observation_preview, observation_preview_revision, fist_confirmation
+        nonlocal zed_left_available, zed_left_since, zed_left_center, grasp_snapshot_bgr
+        preparation_revision += 1
+        observation_preview_revision += 1
+        prepared_grasp = observation_preview = grasp_snapshot_bgr = None
+        fist_confirmation = FistConfirmation()
+        workspace_bbox = pending_bbox = pending_point = None
+        rs_selection_locked = drawing = False
+        num_targets = 0
+        current_masks, all_prompts, pending_targets = {}, [], []
+        zed_pending_targets = []
+        zed_pending_bbox = zed_pending_point = None
+        zed_drawing = False
+        zed_grasp_request_pending = zed_doubao_trigger = zed_left_available = False
+        zed_left_since = zed_left_center = None
+        need_reset = zed_need_reset = True
+        ROS_NODE.dynamic_start_pose = ROS_NODE.dynamic_workspace_center_pose = None
+        ROS_NODE.handover_follow_pose = None
+        STATE = "IDLE"
+        logging.info("Ready for next round: select a new D435 workspace, then press W.")
 
     def select_zed_mode_for_round():
         nonlocal zed_selection_mode, zed_selection_mode_default
@@ -2021,36 +1996,35 @@ def main(debug=False, manual=False, all_directions=False):
         ROS_NODE.zed_selection_mode_callback = select_zed_mode_for_round
 
     def launch_handover_grasp(c_img, c_bgr, l_rgb, r_rgb, masks):
-        nonlocal handover_grasp_running, prepared_grasp
+        nonlocal handover_grasp_running, prepared_grasp, grasp_status, grasp_snapshot_bgr
         if ROS_NODE.motion_failed.is_set():
             return
         if handover_grasp_running:
             return
         handover_grasp_running = True
         prepared_grasp = None
-
-        object_mask = None
-        if 2 in masks and masks[2] is not None:
-            object_mask = masks[2] > 0
-            if object_mask is None or not np.any(object_mask):
-                logging.warning("No object mask found (ID 2). Stopping H2R grasp preparation.")
-                object_mask = None
-        else:
-            logging.warning("No object mask found (ID 2). Stopping H2R grasp preparation.")
-
-        if object_mask is None:
-            logging.warning("H2R requires a valid object mask; reselect the object before preparing.")
+        request_revision = preparation_revision
+        grasp_status = segmentation_rejection_reason(masks)
+        if grasp_status:
             handover_grasp_running = False
             return
+        grasp_snapshot_bgr = c_bgr.copy()
+        grasp_status = "Computing depth and grasp candidates; holding position"
+
+        object_mask = masks[2] > 0
 
         logging.info("Processing ZED frame for handover GraspNet...")
-        zed_depth_mm, zed_disp = compute_ffs_depth_and_disp(l_rgb, r_rgb, K_scaled, baseline)
 
-        def process_handover_grasp(c_img_i, d_img_i, cam_info_i, dev_i, c_mask_i, t_img_i):
-            nonlocal handover_grasp_running, zed_need_reset, prepared_grasp
+        def process_handover_grasp(c_img_i, cam_info_i, dev_i, c_mask_i, t_img_i, left_i, right_i):
+            nonlocal handover_grasp_running, zed_need_reset, prepared_grasp, grasp_status
             try:
                 from graspnetAPI import GraspGroup
 
+                if request_revision != preparation_revision or ROS_NODE.motion_failed.is_set():
+                    return
+                d_img_i, zed_disp = compute_ffs_depth_and_disp(left_i, right_i, K_scaled, baseline)
+                if request_revision != preparation_revision or ROS_NODE.motion_failed.is_set():
+                    return
                 end_points, cloud_o3d, workspace_mask = process_frame(c_img_i, d_img_i, cam_info_i, dev_i, sam_mask=c_mask_i)
                 if end_points is None:
                     raise RuntimeError("No valid points found for GraspNet")
@@ -2107,7 +2081,13 @@ def main(debug=False, manual=False, all_directions=False):
                 prepared_candidates = prepare_ready_grasps(
                     gg_camera, np.asarray(cloud_o3d.points), GRASP_BACKOFF_DIST,
                     ROS_NODE.build_grasp_plan, ROS_NODE.validate_grasp_plan,
+                    cancelled=lambda: (request_revision != preparation_revision
+                                       or ROS_NODE.motion_failed.is_set()),
+                    on_rejected=lambda index, flip, error: logging.warning(
+                        "H2R candidate %d (force_flip=%s) rejected before READY: %s", index, flip, error),
                 )
+                if prepared_candidates is None:
+                    return
                 gg_filtered, selected_flips, ready_plan, physical_count, endpoint_rejections = prepared_candidates
                 logging.info(
                     "H2R grasp filtering: nms=%d, direction=%d, physical_orientations=%d, ready=%d",
@@ -2142,14 +2122,26 @@ def main(debug=False, manual=False, all_directions=False):
                     force_flips=selected_flips,
                 )
 
-                if len(gg_filtered) == 0 or ROS_NODE is None:
-                    raise RuntimeError("No valid grasp candidate generated")
-
+                if request_revision != preparation_revision:
+                    logging.info("Discarding grasp prepared before hand identity/selection reset.")
+                    return
+                if len(gg_filtered) == 0:
+                    grasp_status = (f"No grasp: direction={orient_count}, physical={physical_count}, "
+                                    "reachable=0; adjust object, then retry or reselect")
+                    if endpoint_rejections:
+                        grasp_status += "; " + endpoint_rejections[0]["reason"]
+                    logging.warning(grasp_status)
+                    return
                 prepared_grasp = (gg_filtered, np.array(ROS_NODE.rtde_r.getActualQ()),
                                   time.monotonic(), ready_plan)
-                logging.info("READY: review preview and keep hand/object still; press SPACE to execute.")
+                grasp_status = "Grasp plan available; review hand/object and gripper preview"
+                logging.info("READY: review preview, keep LEFT hand/object still; open RIGHT palm then hold fist 2s.")
             except Exception as error:
-                ROS_NODE.hold_motion_error(error)
+                if request_revision == preparation_revision:
+                    # Preparation commands no motion: vision/no-candidate failures
+                    # stay at the observation pose instead of automatically going Home.
+                    grasp_status = f"Preparation failed: {error}; retry or reselect"
+                    logging.exception(grasp_status)
             finally:
                 handover_grasp_running = False
 
@@ -2157,11 +2149,12 @@ def main(debug=False, manual=False, all_directions=False):
             target=process_handover_grasp,
             args=(
                 c_img.copy(),
-                zed_depth_mm.copy(),
                 camera_info,
                 device,
                 object_mask.copy() if object_mask is not None else None,
                 c_bgr.copy(),
+                l_rgb.copy(),
+                r_rgb.copy(),
             ),
             daemon=True,
         )
@@ -2170,10 +2163,19 @@ def main(debug=False, manual=False, all_directions=False):
     def trigger_zed_segmentation(reason="manual trigger"):
         nonlocal zed_doubao_trigger, zed_need_reset, zed_grasp_request_pending, follow_calc_running, zed_selection_source, zed_sam2_initialized, prepared_grasp
         global STATE
-        if ROS_NODE.motion_failed.is_set() or follow_calc_running or handover_grasp_running:
+        nonlocal preparation_revision, grasp_status, zed_left_available, zed_left_since, zed_left_center
+        if STATE not in ("HANDOVER_SELECTION_PENDING", "HANDOVER_SEGMENTATION"):
+            logging.warning("Segmentation locked: finish positioning with RIGHT fist 2s first.")
+            return
+        if (ROS_NODE.motion_failed.is_set() or follow_calc_running or handover_grasp_running
+                or handover_start_calc_running or ROS_NODE.motion_lock.locked()):
             logging.warning("Cannot segment while motion is running or H2R is stopped.")
             return
+        preparation_revision += 1
         prepared_grasp = None
+        grasp_status = "Identify LEFT hand, then select object"
+        zed_left_available = False
+        zed_left_since = zed_left_center = None
         STATE = "HANDOVER_SEGMENTATION"
         zed_need_reset = True
         zed_grasp_request_pending = False
@@ -2186,8 +2188,49 @@ def main(debug=False, manual=False, all_directions=False):
         else:
             zed_doubao_trigger = False
             zed_selection_source = "manual"
-            logging.info(f"{reason}: entering ZED manual hand/object selection mode. Please click or box-select hand first, then object.")
+            logging.info(f"{reason}: entering ZED manual hand/object selection mode. LEFT hand is selected automatically; click or box-select only the object.")
     
+    def request_observation_preview(depth, camera, pixel):
+        nonlocal observation_preview_running, observation_preview_started, observation_preview
+        if observation_preview_running or time.monotonic() - observation_preview_started < .5:
+            return
+        observation_preview_running = True
+        observation_preview_started = time.monotonic()
+        revision = observation_preview_revision
+        request_state = STATE
+        source_time = time.monotonic()
+
+        def preview():
+            nonlocal observation_preview_running, observation_preview_started, observation_preview
+            locked = False
+            try:
+                hand = calc_hand_base_pos_from_rs_depth(depth, camera, *pixel,
+                                                       log_prefix="LEFT observation preview")
+                reason = "LEFT hand depth invalid"
+                if hand is not None:
+                    locked = ROS_NODE.motion_lock.acquire(blocking=False)
+                    if not locked:
+                        return
+                    reason = ROS_NODE.hand_observation_rejection_reason(hand)
+                if revision == observation_preview_revision and STATE == request_state:
+                    if observation_preview is None or observation_preview["reason"] != reason:
+                        goal = (ROS_NODE.build_follow_left_hand_pose(hand, limit_step=False)
+                                if hand is not None else None)
+                        logging.info("Observation preview: %s; hand_base=%s; tcp_goal=%s; check=%.3fs",
+                                     reason or "reachable", hand, goal, time.monotonic() - source_time)
+                    observation_preview = {"time": time.monotonic(), "source_time": source_time, "pixel": pixel,
+                                           "hand": hand, "reason": reason}
+            except Exception as error:
+                if revision == observation_preview_revision and STATE == request_state:
+                    observation_preview = {"time": time.monotonic(), "source_time": source_time, "pixel": pixel,
+                                           "hand": None, "reason": str(error)}
+            finally:
+                if locked:
+                    ROS_NODE.motion_lock.release()
+                observation_preview_started = time.monotonic()
+                observation_preview_running = False
+        threading.Thread(target=preview, daemon=True).start()
+
     # 刚启动时，自动触发工作台检测
     doubao_trigger = client is not None and not manual
     
@@ -2196,9 +2239,16 @@ def main(debug=False, manual=False, all_directions=False):
             t0 = time.time()
             if ROS_NODE.motion_failed.is_set():
                 STATE = "ERROR"
+            if (seen_home_revision != ROS_NODE.home_revision
+                    and not ROS_NODE.motion_failed.is_set()
+                    and not handover_grasp_running and not recovery_running
+                    and not workspace_calc_running and not follow_calc_running
+                    and not handover_start_calc_running and not ROS_NODE.motion_lock.locked()):
+                reset_workspace_selection()
+                seen_home_revision = ROS_NODE.home_revision
             if (STATE == "HANDOVER_SELECTION_PENDING" and not follow_calc_running
                     and not handover_start_calc_running and not ROS_NODE.motion_lock.locked()):
-                trigger_zed_segmentation(reason="Tracking stopped; queued SPACE accepted")
+                trigger_zed_segmentation(reason="Tracking stopped; gesture/selection accepted")
             if (ROS_NODE.recovery_pending and not recovery_running
                     and not workspace_calc_running and not follow_calc_running
                     and not handover_start_calc_running
@@ -2208,14 +2258,9 @@ def main(debug=False, manual=False, all_directions=False):
                 recovery_running = True
                 STATE = "RECOVERING"
                 def recover_round():
-                    nonlocal recovery_running, release_on_recovery, zed_need_reset
-                    global need_reset, rs_selection_locked
+                    nonlocal recovery_running, release_on_recovery
                     try:
-                        recovered = ROS_NODE.recover_home(release=release_on_recovery)
-                        if recovered:
-                            rs_selection_locked = False
-                        need_reset = True
-                        zed_need_reset = True
+                        ROS_NODE.recover_home(release=release_on_recovery)
                     finally:
                         release_on_recovery = False
                         recovery_running = False
@@ -2251,32 +2296,43 @@ def main(debug=False, manual=False, all_directions=False):
             tracking_img = color_img_bgr.copy()
             color_img = rs_color_image.copy()
             display = tracking_img.copy()
+            results = hands.process(rs_color_image)
+            left_hand_landmarks, left_hand_score = select_left_hand(results)
+            right_hand_landmarks, right_hand_score = select_right_hand(results)
+            if not hands_separated(left_hand_landmarks, right_hand_landmarks):
+                left_hand_landmarks = right_hand_landmarks = None
+            if (right_hand_landmarks is not None
+                    and STATE in ("WAITING_HANDOVER_START_POSE", "HANDOVER_START_REQUESTED",
+                                  "MOVING_TO_HANDOVER", "WAITING_DELIVERY", "FOLLOWING_HAND",
+                                  "HANDOVER_SEGMENTATION")):
+                draw_physical_hand(display, right_hand_landmarks, right_hand_score,
+                                   "Right", mp_drawing, mp_hands.HAND_CONNECTIONS)
 
             # --- ZED in-hand viewer / segmentation ---
             # Keep ZED stream visible in all states (startup, grasping, post-grasp).
             try:
                 zed_color_image = left_rgb.copy()
                 zed_color_image_bgr = left_bgr.copy()
-                zed_display = zed_color_image_bgr.copy()
+                zed_display = (grasp_snapshot_bgr.copy() if handover_grasp_running
+                               and grasp_snapshot_bgr is not None else zed_color_image_bgr.copy())
 
                 if zed_need_reset:
                     if hasattr(sam2_predictor_rs, 'condition_state') and 'point_inputs_per_obj' in sam2_predictor_rs.condition_state:
                         sam2_predictor_rs.reset_state()
                     zed_current_masks = {}
+                    last_mask_time = 0.0
                     zed_all_prompts = []
                     zed_pending_targets = []
-                    if not zed_mouse_selection_pending:
-                        zed_pending_bbox = None
-                        zed_pending_point = None
-                        zed_drawing = False
-                    zed_mouse_selection_pending = False
+                    zed_pending_bbox = None
+                    zed_pending_point = None
+                    zed_drawing = False
                     zed_grasp_request_pending = False
                     zed_segmentation_ready_time = 0.0
                     zed_sam2_initialized = False
                     zed_need_reset = False
                     logging.info("Reset ZED hand/object segmentation targets.")
 
-                if zed_doubao_trigger and not zed_vlm_running:
+                if STATE == "HANDOVER_SEGMENTATION" and zed_doubao_trigger and not zed_vlm_running:
                     zed_vlm_snapshot = zed_color_image_bgr.copy()
                     zed_vlm_running = True
 
@@ -2295,9 +2351,55 @@ def main(debug=False, manual=False, all_directions=False):
                     ).start()
                     zed_doubao_trigger = False
 
+                if (STATE == "HANDOVER_SEGMENTATION" and zed_selection_mode == "manual"
+                        and not zed_sam2_initialized and not handover_grasp_running
+                        and time.monotonic() - zed_hand_checked_at >= .1):
+                    zed_hand_checked_at = time.monotonic()
+                    zed_left_available = False
+                    zed_results = zed_hands.process(left_rgb)
+                    zed_left, _ = select_left_hand(zed_results)
+                    zed_right, _ = select_right_hand(zed_results)
+                    if zed_left is not None:
+                        coords = np.array([(lm.x, lm.y) for lm in zed_left.landmark])
+                        valid = np.all(np.isfinite(coords)) and np.all((coords >= 0) & (coords <= 1))
+                        # Reject overlapping hands: handedness alone is unreliable at crossings.
+                        valid = valid and hands_separated(zed_left, zed_right)
+                        center = coords[[0, 5, 9, 13, 17]].mean(0)
+                        now = time.monotonic()
+                        if valid:
+                            if zed_left_center is None or np.linalg.norm(center - zed_left_center) > .05:
+                                zed_left_since = now
+                            zed_left_center = center
+                            zed_left_available = zed_left_since is not None and now - zed_left_since >= .5
+                            if (zed_left_available and zed_selection_mode == "manual"
+                                    and not zed_sam2_initialized and not handover_grasp_running):
+                                palm = zed_left.landmark[9]
+                                hand_prompt = {"id": 1, "label": "physical_left_hand",
+                                               "point": (int(palm.x * IMG_WIDTH), int(palm.y * IMG_HEIGHT)),
+                                               "point_candidates": [(int(coords[i, 0] * IMG_WIDTH),
+                                                                     int(coords[i, 1] * IMG_HEIGHT))
+                                                                    for i in (0, 5, 17, 13, 9, 8, 12, 16, 20)]}
+                                zed_all_prompts = [hand_prompt] + [p for p in zed_all_prompts if p["id"] != 1]
+                        else:
+                            zed_left_since = zed_left_center = None
+                    else:
+                        zed_left_since = zed_left_center = None
+                    if not zed_left_available:
+                        prepared_grasp = None
+                        if not zed_sam2_initialized:
+                            zed_all_prompts = []
+                            zed_pending_bbox = zed_pending_point = None
+                        cv2.putText(zed_display, "Waiting for unambiguous LEFT hand; keep hands apart",
+                                    (10, 55), cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 165, 255), 2)
+                elif STATE != "HANDOVER_SEGMENTATION":
+                    zed_left_available = False
+                    zed_left_since = zed_left_center = None
+
                 if zed_selection_mode == "manual" and STATE == "HANDOVER_SEGMENTATION":
-                    if (zed_pending_bbox is not None or zed_pending_point is not None) and len(zed_all_prompts) < 2:
-                        next_id = 1 if len(zed_all_prompts) == 0 else 2
+                    if (zed_left_available and zed_all_prompts
+                            and (zed_pending_bbox is not None or zed_pending_point is not None)
+                            and len(zed_all_prompts) < 2):
+                        next_id = 2
                         next_label = "hand" if next_id == 1 else "object"
                         target = {"id": next_id, "label": next_label}
                         if zed_pending_bbox is not None:
@@ -2309,31 +2411,34 @@ def main(debug=False, manual=False, all_directions=False):
                         zed_all_prompts.append(target)
                         logging.info(f"Added manual ZED target {next_id}: {next_label}")
 
-                    if len(zed_all_prompts) == 2 and not zed_current_masks and not zed_grasp_request_pending:
+                    prompt_args = None
+                    if len(zed_all_prompts) == 2 and not zed_sam2_initialized:
+                        try:
+                            prompt_args = manual_segmentation_prompts(*zed_all_prompts)
+                        except ValueError as error:
+                            grasp_status = str(error)
+                            logging.warning(grasp_status)
+                            zed_all_prompts = zed_all_prompts[:1]
+                    if (prompt_args is not None and not zed_sam2_initialized
+                            and not handover_grasp_running):
                         if hasattr(sam2_predictor_rs, 'condition_state') and 'point_inputs_per_obj' in sam2_predictor_rs.condition_state:
                             sam2_predictor_rs.reset_state()
                         zed_vlm_snapshot = zed_color_image_bgr.copy()
                         sam2_predictor_rs.load_first_frame(zed_vlm_snapshot)
                         zed_sam2_initialized = True
 
-                        for prompt in zed_all_prompts:
-                            tid = int(prompt["id"])
-                            if "bbox" in prompt:
-                                x1, y1, x2, y2 = prompt["bbox"]
-                                bbox_arr = np.array([[x1, y1], [x2, y2]], dtype=np.float32)
-                                sam2_predictor_rs.add_new_prompt(frame_idx=0, obj_id=tid, bbox=bbox_arr)
-                            elif "point" in prompt:
-                                px, py = prompt["point"]
-                                pts_arr = np.array([[px, py]], dtype=np.float32)
-                                lbl_arr = np.array([1], dtype=np.int32)
-                                sam2_predictor_rs.add_new_prompt(frame_idx=0, obj_id=tid, points=pts_arr, labels=lbl_arr)
+                        for prompt, arguments in zip(zed_all_prompts, prompt_args):
+                            if "bbox" in arguments:
+                                arguments["bbox"] = np.asarray(arguments["bbox"], dtype=np.float32)
+                            sam2_predictor_rs.add_new_prompt(frame_idx=0, obj_id=int(prompt["id"]),
+                                                            **arguments)
 
                         save_hand_object_bbox_artifacts(zed_vlm_snapshot, zed_all_prompts, prefix="human2robot_manual_bbox")
                         zed_grasp_request_pending = True
                         zed_segmentation_ready_time = time.time()
                         logging.info("Manual ZED hand/object prompts are ready. Waiting for SAM2 to stabilize before GraspNet.")
 
-                if zed_pending_targets:
+                if STATE == "HANDOVER_SEGMENTATION" and zed_pending_targets:
                     if hasattr(sam2_predictor_rs, 'condition_state') and 'point_inputs_per_obj' in sam2_predictor_rs.condition_state:
                         sam2_predictor_rs.reset_state()
 
@@ -2356,12 +2461,18 @@ def main(debug=False, manual=False, all_directions=False):
                     zed_grasp_request_pending = True
                     zed_segmentation_ready_time = time.time()
 
-                if zed_sam2_initialized and zed_all_prompts:
+                if (STATE == "HANDOVER_SEGMENTATION" and zed_sam2_initialized
+                        and zed_all_prompts and not handover_grasp_running):
                     out_obj_ids, out_mask_logits = sam2_predictor_rs.track(zed_color_image_bgr)
                     zed_current_masks = {}
                     for i in range(len(out_obj_ids)):
                         obj_id = out_obj_ids[i]
                         zed_current_masks[obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy().squeeze()
+                    last_mask_time = time.monotonic()
+                    zed_left_available = segmentation_rejection_reason(zed_current_masks) is None
+                    if not zed_left_available:
+                        prepared_grasp = None
+                        grasp_status = segmentation_rejection_reason(zed_current_masks)
 
                 for obj_id, mask in zed_current_masks.items():
                     if mask is not None and mask.shape == zed_display.shape[:2]:
@@ -2394,9 +2505,9 @@ def main(debug=False, manual=False, all_directions=False):
                     cv2.putText(zed_display, "MLLM Detecting Hand/Object...", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 elif zed_selection_mode == "manual" and STATE == "HANDOVER_SEGMENTATION":
                     if len(zed_all_prompts) == 0:
-                        zed_manual_hint = "Manual ZED Seg: select hand first"
+                        zed_manual_hint = "Auto-selecting physical LEFT hand"
                     elif len(zed_all_prompts) == 1:
-                        zed_manual_hint = "Manual ZED Seg: select object second"
+                        zed_manual_hint = "LEFT selected automatically: select OBJECT only"
                     else:
                         zed_manual_hint = "Manual ZED Seg: hand/object selected"
                     cv2.putText(zed_display, zed_manual_hint, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
@@ -2405,31 +2516,29 @@ def main(debug=False, manual=False, all_directions=False):
                     if (prepared_grasp is not None
                             and time.monotonic() - prepared_grasp[2] > 30.0):
                         prepared_grasp = None
+                        grasp_status = "Grasp plan expired: hold RIGHT fist to prepare again"
                         logging.info("H2R READY expired; prepare the grasp again.")
-                    if prepared_grasp is not None:
-                        cv2.putText(zed_display, "READY: review grasp then press SPACE",
-                                    (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                     if zed_grasp_request_pending:
                         wait_left = max(0.0, SAM2_SETTLE_SECONDS - (time.time() - zed_segmentation_ready_time))
-                        rs_hint = f"ZED Segmentation | waiting {wait_left:.1f}s -> GraspNet | r=Reset | q=Quit"
+                        rs_hint = f"ZED Segmentation | waiting {wait_left:.1f}s -> GraspNet | r=Reset | ESC=Exit"
                     else:
                         if zed_selection_mode == "manual":
-                            rs_hint = "ZED Segmentation(manual) | click/box hand then object | SPACE=Prepare/Execute | 0=Home | r=Reset | q=Quit"
+                            rs_hint = "ZED Segmentation(manual) | auto LEFT; click/box OBJECT | RIGHT fist=Confirm | 0=Home | r=Reset | ESC=Exit"
                         else:
-                            rs_hint = "ZED Segmentation(MLLM) | SPACE=Prepare/Execute | 0=Home | r=Reset | q=Quit"
+                            rs_hint = "ZED Segmentation(MLLM) | RIGHT fist=Confirm | 0=Home | r=Reset | ESC=Exit"
                 else:
                     if STATE in ("FOLLOWING_HAND", "WAITING_DELIVERY"):
-                        rs_hint = "Drag/click HAND to stop tracking and select | then select OBJECT"
+                        rs_hint = "RIGHT fist 2s: stop tracking | auto LEFT; select OBJECT"
                     elif STATE == "HANDOVER_SELECTION_PENDING":
                         rs_hint = "Stopping tracking... selection queued"
                     else:
-                        rs_hint = f"ZED Live | state={STATE} | mode={zed_selection_mode} | q=Quit"
+                        rs_hint = f"ZED Live | state={STATE} | mode={zed_selection_mode} | ESC=Exit"
                 rs_status = rs_hint
                 cv2.putText(zed_display, rs_status, (10, zed_display.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
-                cv2.imshow("ZED Inhand Viewer", zed_display)
-
-                if zed_grasp_request_pending and zed_all_prompts and (not handover_grasp_running):
+                if (STATE == "HANDOVER_SEGMENTATION"
+                        and zed_grasp_request_pending and zed_all_prompts and zed_left_available
+                        and not handover_grasp_running):
                     if time.time() - zed_segmentation_ready_time >= SAM2_SETTLE_SECONDS:
                         zed_grasp_request_pending = False
                         launch_handover_grasp(
@@ -2442,10 +2551,21 @@ def main(debug=False, manual=False, all_directions=False):
             except Exception as e:
                 logging.error(f"ZED inhand segmentation read error: {e}")
 
+            if STATE in ("WAITING_HANDOVER_START_POSE", "WAITING_DELIVERY"):
+                if left_hand_landmarks is None:
+                    observation_preview = None
+                    observation_preview_revision += 1
+                else:
+                    palm = left_hand_landmarks.landmark[9]
+                    pixel = (int(palm.x * rs_depth_image.shape[1]),
+                             int(palm.y * rs_depth_image.shape[0]))
+                    request_observation_preview(rs_depth_image.copy(), camera_info_rs, pixel)
+            else:
+                observation_preview = None
+                observation_preview_revision += 1
+
             # --- MediaPipe Left-Hand Handover ---
             if STATE in ("WAITING_HANDOVER_START_POSE", "HANDOVER_START_REQUESTED", "WAITING_DELIVERY", "FOLLOWING_HAND"):
-                results = hands.process(cv2.cvtColor(color_img_bgr, cv2.COLOR_BGR2RGB))
-                left_hand_landmarks, left_hand_score = select_left_hand(results)
                 if left_hand_landmarks:
                     mp_drawing.draw_landmarks(display, left_hand_landmarks, mp_hands.HAND_CONNECTIONS)
                     
@@ -2464,15 +2584,16 @@ def main(debug=False, manual=False, all_directions=False):
                             if hand_base_pos is not None and STATE == "HANDOVER_START_REQUESTED":
                                 ROS_NODE.ensure_motion_ready()
                                 ROS_NODE.update_left_hand_base_pos(hand_base_pos)
-                                handover_joint_q = ROS_NODE.build_handover_joint_q(hand_base_pos)
-                                if handover_joint_q is None:
-                                    return
+                                if ROS_NODE.dynamic_start_pose is None:
+                                    raise RuntimeError("Workspace observation pose is missing")
+                                ROS_NODE.handover_follow_pose = list(ROS_NODE.dynamic_start_pose)
+                                ROS_NODE.hand_observation_error = ""
                                 STATE = "MOVING_TO_HANDOVER"
-                                ROS_NODE.move_joint(handover_joint_q, .5, .5)
-                                ROS_NODE.handover_follow_pose = list(ROS_NODE.rtde_r.getActualTCPPose())
-                                ROS_NODE.handover_follow_z_offset = None
+                                # Start with the same bounded lift-first step as subsequent frames;
+                                # never switch to the former fixed folded joint configuration.
+                                ROS_NODE.follow_left_hand(hand_base_pos)
                                 STATE = "FOLLOWING_HAND"
-                                logging.info("Handover observation reached. SPACE to select hand/object.")
+                                logging.info("Overhead hand guidance started. Open RIGHT palm, then fist 2s to stop tracking.")
                         except Exception as error:
                             ROS_NODE.hold_motion_error(error)
                         finally:
@@ -2490,27 +2611,18 @@ def main(debug=False, manual=False, all_directions=False):
                         finally:
                             follow_calc_running = False
 
-                    if STATE == "WAITING_HANDOVER_START_POSE":
-                        cv2.putText(display, "LEFT hand detected. SPACE to start tracking.", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-                    elif STATE == "HANDOVER_START_REQUESTED":
-                        cv2.putText(display, "Aligning handover start to Left hand...", (cx-90, cy-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    if STATE == "HANDOVER_START_REQUESTED":
+                        cv2.putText(display, "Preparing overhead LEFT-hand observation...", (cx-90, cy-35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                         if not handover_start_calc_running:
                             handover_start_calc_running = True
                             t = threading.Thread(target=calc_rs_and_update_handover_start, args=(rs_depth_image.copy(), camera_info_rs, cx, cy), daemon=True)
                             t.start()
 
-                    elif STATE == "WAITING_DELIVERY":
-                        cv2.putText(display, "SPACE to resume LEFT hand tracking.", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
                     elif STATE == "FOLLOWING_HAND":
-                        cv2.putText(display, "Following LEFT hand. SPACE to select hand/object.", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                         if not follow_calc_running:
                             follow_calc_running = True
                             t = threading.Thread(target=calc_rs_and_follow, args=(rs_depth_image.copy(), camera_info_rs, cx, cy), daemon=True)
                             t.start()
-                else:
-                    cv2.putText(display, "Waiting for MediaPipe Left hand...", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
 
 
             # 这里原本是 MLLM 调用，现已废弃
@@ -2525,7 +2637,7 @@ def main(debug=False, manual=False, all_directions=False):
                 pending_point = None
                 current_masks = {}
                 all_prompts = []
-                # workspace_bbox = None # (可选)如果重置想要一起清空工作台
+                workspace_bbox = None  # The workspace selection outline is not a live overlay.
                 logging.info("Reset, select new targets.")
 
             # --- SAM2: Initialize object tracking ---
@@ -2575,7 +2687,7 @@ def main(debug=False, manual=False, all_directions=False):
                     cv2.drawContours(display, contours, -1, (0, 255, 0), 2)
             
             # 画当前工作台框 (Rotated Rect from SAM2)
-            if workspace_bbox is not None:
+            if workspace_bbox is not None and STATE == "IDLE":
                 cv2.polylines(display, [workspace_bbox], isClosed=True, color=(0, 165, 255), thickness=2, lineType=cv2.LINE_AA)
                 cv2.putText(display, "Workspace", (workspace_bbox[0][0], max(20, workspace_bbox[0][1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
                 
@@ -2589,17 +2701,145 @@ def main(debug=False, manual=False, all_directions=False):
             fps = 1.0 / (t1 - t0)
             cv2.putText(display, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            status = f"Targets: {num_targets} | STATE: {STATE} | w=Workspace | SPACE=Select/Prepare/Execute | 0=Home | r=reset | q=quit"
+            status = f"Targets: {num_targets} | STATE: {STATE} | w=Workspace | RIGHT fist=Confirm | 0=Home | r=reset | ESC=Exit"
             cv2.putText(display, status, (10, display.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            if STATE == "ERROR":
-                cv2.putText(display, "H2R STOPPED: check terminal | 0=Release+Home", (10, 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-            cv2.imshow("Realsense Viewer", display)
-            
+            now = time.monotonic()
+            gesture_context = None
+            stage = f"H2R | {STATE}"
+            blocked = ""
+            status = ""
+            action = ""
+            progress = 0.0
+            color = (0, 200, 255)
+            guidance_states = ("WAITING_HANDOVER_START_POSE", "WAITING_DELIVERY", "FOLLOWING_HAND")
+            if STATE in guidance_states:
+                action = "stop tracking and select object" if STATE == "FOLLOWING_HAND" else "start overhead guidance"
+                stage = f"H2R | {action.upper()}"
+                if left_hand_landmarks is None:
+                    blocked = "LEFT hand missing/uncertain or hands overlap"
+                elif STATE == "FOLLOWING_HAND":
+                    blocked = ROS_NODE.hand_observation_error
+                elif (observation_preview is None or now - observation_preview["time"] > 2.0
+                      or now - observation_preview["source_time"] > 4.0
+                      or np.linalg.norm(np.array(pixel) - observation_preview["pixel"]) >= 25):
+                    blocked = "Checking LEFT depth and observation reachability..."
+                else:
+                    blocked = observation_preview["reason"] or ""
+                if not blocked and right_hand_landmarks is None:
+                    blocked = "Show RIGHT confirmation hand; keep hands apart"
+                if not blocked and STATE != "FOLLOWING_HAND":
+                    try:
+                        ROS_NODE.ensure_motion_ready()
+                        if np.max(np.abs(ROS_NODE.rtde_r.getActualQd())) > .003:
+                            blocked = "Robot is moving: wait for it to stop"
+                    except Exception as error:
+                        blocked = str(error)
+                if not blocked:
+                    gesture_context = (STATE, None)
+                    status = f"READY: {action}"
+            elif STATE == "HANDOVER_SEGMENTATION":
+                stage = "H2R | REVIEW HAND/OBJECT AND GRASP"
+                blocked = segmentation_rejection_reason(zed_current_masks) or ""
+                if handover_grasp_running:
+                    blocked = "Computing depth / candidates; snapshot preview, robot holding"
+                elif zed_grasp_request_pending:
+                    blocked = "Waiting for segmentation to settle..."
+                elif not zed_sam2_initialized:
+                    blocked = "Identifying LEFT hand / waiting for object selection"
+                elif now - last_mask_time > 2.0:
+                    blocked = "Segmentation frame is stale"
+                if not blocked and prepared_grasp is not None:
+                    _, expected_q, ready_time, _ = prepared_grasp
+                    try:
+                        rejection = ready_rejection_reason(
+                            expected_q, ready_time, ROS_NODE.rtde_r.getActualQ(), now=now,
+                            camera_frame_times=(last_rs_frame_time, last_zed_frame_time),
+                            joint_velocities=ROS_NODE.rtde_r.getActualQd())
+                        ROS_NODE.ensure_motion_ready()
+                    except Exception as error:
+                        rejection = str(error)
+                    if rejection:
+                        blocked = rejection
+                        if rejection in ("READY expired", "Robot moved since READY"):
+                            prepared_grasp = None
+                            grasp_status = rejection + ": prepare again"
+                    else:
+                        action = "execute grasp"
+                        status = "READY: grasp pose checked; review gripper preview"
+                        gesture_context = (STATE, ready_time)
+                elif not blocked:
+                    # No candidate is a stationary retry, never a return to tracking/Home.
+                    action = "retry preparation"
+                    status = grasp_status or "No grasp: adjust object and retry"
+                    gesture_context = (STATE, "prepare")
+                    try:
+                        ROS_NODE.ensure_motion_ready()
+                        if np.max(np.abs(ROS_NODE.rtde_r.getActualQd())) > .003:
+                            blocked = "Robot is moving: wait before preparing"
+                    except Exception as error:
+                        blocked = str(error)
+                if gesture_context is not None and right_hand_landmarks is None:
+                    blocked = "Show RIGHT confirmation hand"
+            else:
+                blocked = (ROS_NODE.motion_error if STATE == "ERROR" else
+                           "Select workspace and press W" if STATE == "IDLE" else
+                           "Operation in progress; wait")
+            if ROS_NODE.motion_failed.is_set():
+                blocked = ROS_NODE.motion_error or "Robot stopped: check controller"
+            confirmation_ready = not blocked
+            if blocked:
+                # Preserve the open-palm arming within this stage across preview jitter.
+                # A current valid check is still required for the full fist timer.
+                if (STATE in guidance_states and left_hand_landmarks is not None
+                        and right_hand_landmarks is not None and not ROS_NODE.motion_failed.is_set()):
+                    gesture_context = (STATE, None)
+                else:
+                    gesture_context = None
+                status = "NOT READY: " + blocked
+                color = (0, 100, 255)
+            elif action == "execute grasp" or STATE in guidance_states:
+                color = (0, 255, 0)
+            gesture_confirm = fist_confirmation.update(
+                gesture_context, visible=gesture_context is not None,
+                fist=right_hand_landmarks is not None and is_fist(right_hand_landmarks),
+                open_palm=right_hand_landmarks is not None and is_open_palm(right_hand_landmarks),
+                now=now, ready=confirmation_ready,
+            )
+            hint, progress = fist_confirmation.feedback(now)
+            detail = ""
+            if STATE == "HOME_READY":
+                hint = "HOME: gripper open"
+                detail = "0=Reset workspace | ESC=Exit"
+                color = (0, 255, 255)
+            elif blocked:
+                hint = ("NOT REACHABLE: move hand, then wait for READY"
+                        if "unreachable" in blocked.lower() or "controller limits" in blocked.lower()
+                        else "Checking hand position... hold still"
+                        if blocked.startswith("Checking LEFT") else "NOT READY: " + blocked)
+                detail = blocked if hint != "NOT READY: " + blocked else ""
+            elif gesture_confirm:
+                hint = "RIGHT FIST CONFIRMED"
+            elif fist_confirmation.fist_since is not None:
+                color = (0, 255, 0)
+            elif fist_confirmation.armed:
+                hint = "READY: hold RIGHT FIST 2s to confirm"
+                detail = action
+            else:
+                hint = "Open RIGHT palm, then hold RIGHT FIST 2s"
+                detail = status
+            draw_handover_hint(display, hint, color, detail)
+            draw_handover_hint(zed_display, hint, color, detail)
+            show_realsense(display)
+            show_zed(zed_display)
+
             key = cv2.waitKey(1) & 0xFF
             
-            if key == ord('w'):
+            if key == 27:
+                ROS_NODE.motion_failed.set()
+                logging.info("ESC: stopping and exiting without release or Home.")
+                break
+            elif key == ord('w'):
                 if STATE != "IDLE" or workspace_calc_running or handover_grasp_running:
                     logging.warning("Workspace request ignored: H2R is busy or stopped.")
                     continue
@@ -2687,11 +2927,11 @@ def main(debug=False, manual=False, all_directions=False):
 
                                     select_zed_mode_for_round()
                                     STATE = "WAITING_HANDOVER_START_POSE"
-                                    ROS_NODE.get_logger().info("Workspace recognized. Show LEFT hand, then press SPACE to start tracking.")
+                                    ROS_NODE.get_logger().info("Workspace recognized. Show LEFT hand; open RIGHT palm then hold RIGHT fist 2s to start tracking.")
                                     with ROS_NODE.left_hand_lock:
                                         ROS_NODE.left_hand_base_pos = None
                                         ROS_NODE.left_hand_seen_time = 0.0
-                                    logging.info("Workspace observation ready. SPACE to start LEFT hand tracking, or R to reselect workspace.")
+                                    logging.info("Workspace observation ready. Open RIGHT palm then fist 2s to start LEFT tracking; R reselects workspace.")
                                 except Exception as error:
                                     ROS_NODE.hold_motion_error(error)
                                 finally:
@@ -2709,10 +2949,10 @@ def main(debug=False, manual=False, all_directions=False):
                 else:
                     logging.warning("No SAM2 tracking target to set as workspace. Please specify target first.")
             elif key == ord('v'):
-                if STATE in ("WAITING_DELIVERY", "FOLLOWING_HAND", "HANDOVER_SEGMENTATION"):
-                    trigger_zed_segmentation(reason="Manual key v")
+                if STATE == "HANDOVER_SEGMENTATION":
+                    trigger_zed_segmentation(reason="Manual key v: reselect hand/object")
                 else:
-                    logging.warning("Press 'v' after the robot reaches the handover observation position.")
+                    logging.warning("V cannot enter segmentation: finish positioning with RIGHT fist 2s first.")
             elif key == ord('0'):
                 if recovery_running or handover_grasp_running or ROS_NODE.motion_lock.locked():
                     logging.warning("Wait for the active operation before pressing 0; use hardware stop for urgent stopping.")
@@ -2722,17 +2962,17 @@ def main(debug=False, manual=False, all_directions=False):
                 release_on_recovery = True
                 prepared_grasp = None
                 STATE = "ERROR"
-            elif key == 32:
+            elif gesture_confirm:
                 if STATE == "WAITING_HANDOVER_START_POSE":
                     STATE = "HANDOVER_START_REQUESTED"
-                    logging.info("SPACE accepted. Waiting for LEFT hand to start tracking.")
+                    logging.info("RIGHT fist confirmed. Waiting for LEFT hand to start tracking.")
                     continue
                 if STATE == "WAITING_DELIVERY":
                     STATE = "FOLLOWING_HAND"
                     continue
                 if STATE == "FOLLOWING_HAND":
                     STATE = "HANDOVER_SELECTION_PENDING"
-                    logging.info("SPACE accepted. Waiting for the current tracking move to finish before ZED selection.")
+                    logging.info("RIGHT fist confirmed. Waiting for the current tracking move to finish before ZED selection.")
                     continue
                 if STATE == "HANDOVER_SEGMENTATION" and prepared_grasp is not None:
                     if handover_grasp_running:
@@ -2745,7 +2985,8 @@ def main(debug=False, manual=False, all_directions=False):
                         joint_velocities=ROS_NODE.rtde_r.getActualQd(),
                     )
                     if rejection is not None:
-                        logging.warning("READY cancelled: %s. Press SPACE to prepare again.", rejection)
+                        grasp_status = rejection + ": release then hold RIGHT fist to prepare again"
+                        logging.warning("READY cancelled: %s. Release then hold RIGHT fist to prepare again.", rejection)
                         continue
                     handover_grasp_running = True
                     STATE = "GRASPING"
@@ -2761,7 +3002,7 @@ def main(debug=False, manual=False, all_directions=False):
                     threading.Thread(target=execute_ready, args=(selected, ready_plan), daemon=True).start()
                     continue
                 if STATE != "HANDOVER_SEGMENTATION":
-                    logging.warning("Press SPACE while following to select hand/object.")
+                    logging.warning("Confirm with RIGHT fist while following to select the object.")
                     continue
 
                 if 'zed_color_image' not in locals():
@@ -2798,14 +3039,7 @@ def main(debug=False, manual=False, all_directions=False):
                 elif (STATE in ("IDLE", "WAITING_HANDOVER_START_POSE")
                       and not workspace_calc_running and not handover_start_calc_running
                       and not follow_calc_running and not ROS_NODE.motion_lock.locked()):
-                    STATE = "IDLE"
-                    workspace_bbox = None
-                    pending_bbox = None
-                    pending_point = None
-                    rs_selection_locked = False
-                    drawing = False
-                    need_reset = True
-                    logging.info("Workspace selection cancelled. Select a new D435 region, then press W.")
+                    reset_workspace_selection()
                 else:
                     logging.warning("Workspace reset blocked while busy or stopped; use 0 for Home.")
             elif key == ord('q'):
@@ -2813,6 +3047,7 @@ def main(debug=False, manual=False, all_directions=False):
                 
     finally:
         ROS_NODE.motion_failed.set()
+        zed_hands.close()
         zed.close()
         if pipeline is not None:
             try:

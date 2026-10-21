@@ -1,0 +1,74 @@
+{
+  "timestamp": "20261021_183554",
+  "note": "robot2human",
+  "raw_count": 60,
+  "selected_count": 2,
+  "image_size": {
+    "width": 640,
+    "height": 360
+  },
+  "network_raw_count": 320,
+  "nms_count": 60,
+  "direction_count": 37,
+  "all_directions": false,
+  "physical_orientation_count": 4,
+  "selected_symmetry_flips": [
+    false,
+    true
+  ],
+  "endpoint_rejections": [
+    {
+      "candidate": 2,
+      "force_flip": false,
+      "reason": "lift: no IK solution; xyz=[-0.05845559450783673, -0.44295515389591616, 0.19579914009786276]"
+    },
+    {
+      "candidate": 3,
+      "force_flip": true,
+      "reason": "lift: no IK solution; xyz=[-0.05771715747211875, -0.442858669302645, 0.19581505162567076]"
+    }
+  ],
+  "camera_to_base": {
+    "source_frame": "zed_inhand_camera_frame_optical",
+    "target_frame": "base_link",
+    "translation_m": [
+      0.059962918256365294,
+      0.41814342285417255,
+      0.3008399558443198
+    ],
+    "quaternion_xyzw": [
+      0.9385505575970688,
+      -0.3445419756059473,
+      -0.0029999412075084357,
+      0.0201166158320302
+    ]
+  },
+  "ready_plan_controller": {
+    "approach": [
+      -0.023629273623122855,
+      -0.41442434844853165,
+      0.07136002600223984,
+      3.0207633409759027,
+      0.6001058795295939,
+      -0.44282581268129206
+    ],
+    "grasp": [
+      -0.04526698404141954,
+      -0.42115459457809157,
+      -0.005363590146176156,
+      3.0207633409759027,
+      0.6001058795295939,
+      -0.44282581268129206
+    ],
+    "lift": [
+      -0.023629273623122855,
+      -0.41442434844853165,
+      0.19463640985382386,
+      3.0207633409759027,
+      0.6001058795295939,
+      -0.44282581268129206
+    ]
+  },
+  "gripper_force_N": 30.0,
+  "lift_height_m": 0.2
+}

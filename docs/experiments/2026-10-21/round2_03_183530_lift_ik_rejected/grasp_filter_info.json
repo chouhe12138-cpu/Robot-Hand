@@ -1,0 +1,46 @@
+{
+  "timestamp": "20261021_183530",
+  "note": "robot2human",
+  "raw_count": 15,
+  "selected_count": 0,
+  "image_size": {
+    "width": 640,
+    "height": 360
+  },
+  "network_raw_count": 39,
+  "nms_count": 15,
+  "direction_count": 7,
+  "all_directions": false,
+  "physical_orientation_count": 2,
+  "selected_symmetry_flips": [],
+  "endpoint_rejections": [
+    {
+      "candidate": 0,
+      "force_flip": false,
+      "reason": "lift: no IK solution; xyz=[-0.03892846371594637, -0.4718374859383051, 0.12740994610330442]"
+    },
+    {
+      "candidate": 1,
+      "force_flip": true,
+      "reason": "lift: no IK solution; xyz=[-0.038479917051510076, -0.472439090251691, 0.12739044603970617]"
+    }
+  ],
+  "camera_to_base": {
+    "source_frame": "zed_inhand_camera_frame_optical",
+    "target_frame": "base_link",
+    "translation_m": [
+      0.050873504710130135,
+      0.4951813092507977,
+      0.3092971456519028
+    ],
+    "quaternion_xyzw": [
+      0.8234353704225575,
+      -0.5670455870803268,
+      -0.007891847636499432,
+      0.01874064168259174
+    ]
+  },
+  "ready_plan_controller": null,
+  "gripper_force_N": 30.0,
+  "lift_height_m": 0.2
+}

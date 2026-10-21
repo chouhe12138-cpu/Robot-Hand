@@ -1,8 +1,10 @@
 ## 本机使用
 
-当前项目状态、测试命令、已知问题与待办见 [项目交接文档](PROJECT_HANDOVER.md)。
+当前项目状态、操作流程、参数、已知问题与待办统一见 [项目交接文档](PROJECT_HANDOVER.md)（2026-10-21 更新）。桌面抓取及 20 cm 抬升已有历史真机记录，完整稳定的双向交接尚未验收。
 
-本机环境已迁移，请先阅读 [本机配置与启动说明](LOCAL_SETUP.md)。每个终端在项目根目录执行 `source activate_handover.bash`。下方保留上游通用安装说明。
+2026-10-21 的 Cat R2H 两轮四个精选样例、日志与 CAD 对照见 [实验归档](docs/experiments/2026-10-21/README.md)。
+
+本机环境已迁移，请先阅读 [本机配置与启动说明](LOCAL_SETUP.md)。每个终端在项目根目录执行 `source activate_handover.bash`。本机无需重新安装环境。下方保留上游通用安装说明；其中功能列表表示已有流程代码，不代表本机完整交接验收通过。人工选择使用 `--manual --debug`，无需 API；`--debug` 仍会执行硬件动作。
 
 <div align="center">
 
@@ -132,6 +134,8 @@ python robot2human_handover.py --debug
 ## English
 
 ### ✨ Implemented Features
+
+These pipelines are implemented, but reliable end-to-end handover has not been accepted on this local setup. See [the current project status](PROJECT_HANDOVER.md).
 
 - 🦾 Integrated UR3e with Robotiq 2F-85 gripper.
 - 🤝 Human-to-robot handover pipeline.

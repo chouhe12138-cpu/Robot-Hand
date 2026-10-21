@@ -1,0 +1,24 @@
+{
+  "recorded_unix": 1792396376.6018674,
+  "source": "user_positioned_current_robot_pose",
+  "joint_positions_rad": [
+    -7.788287561538709e-07,
+    -1.5708137951292933,
+    4.116688863575746e-06,
+    -1.5707828682719374,
+    -7.454548970997621e-06,
+    -1.255665914356996e-06
+  ],
+  "tcp_pose_controller": [
+    -0.0003874698884049379,
+    -0.35915629202592403,
+    0.6928248260031062,
+    -0.0009015673404622585,
+    -2.227039234942213,
+    2.2150017203919385
+  ],
+  "tcp_offset_note": "Existing calibrated TCP; pose is diagnostic, home uses joints",
+  "robot_mode": 7,
+  "safety_mode": 1,
+  "motion_commands_sent": false
+}

@@ -1,0 +1,21 @@
+{
+  "timestamp": "20261021_182445",
+  "note": "robot2human",
+  "raw_count": 23,
+  "selected_count": 2,
+  "image_size": {
+    "width": 640,
+    "height": 360
+  },
+  "network_raw_count": 109,
+  "nms_count": 23,
+  "direction_count": 7,
+  "all_directions": false,
+  "physical_orientation_count": 2,
+  "selected_symmetry_flips": [
+    false,
+    true
+  ],
+  "endpoint_rejections": [],
+  "lift_height_m": 0.2
+}

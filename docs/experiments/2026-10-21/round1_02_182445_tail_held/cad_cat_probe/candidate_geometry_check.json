@@ -1,0 +1,57 @@
+{
+  "approach_distance_m": 0.08,
+  "geometry_config": "config/robotiq_2f85.json",
+  "note": "Offline mesh screening only. CAD alignment uncertain, no IK or force-closure validation. Candidate zero was executed.",
+  "results": [
+    {
+      "scene": "observed",
+      "kept": 2,
+      "total": 2,
+      "candidates": [
+        {
+          "index": 0,
+          "flip": false,
+          "width_m": 0.050702620297670364,
+          "score": 0.26785361766815186,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 1,
+          "flip": true,
+          "width_m": 0.050702620297670364,
+          "score": 0.26785361766815186,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        }
+      ]
+    },
+    {
+      "scene": "observed_plus_aligned_cad",
+      "kept": 2,
+      "total": 2,
+      "candidates": [
+        {
+          "index": 0,
+          "flip": false,
+          "width_m": 0.050702620297670364,
+          "score": 0.26785361766815186,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 1,
+          "flip": true,
+          "width_m": 0.050702620297670364,
+          "score": 0.26785361766815186,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        }
+      ]
+    }
+  ]
+}

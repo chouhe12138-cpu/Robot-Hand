@@ -1,0 +1,169 @@
+Failed to import ros dependencies in rigid_transforms.py
+autolab_core not installed as catkin package, RigidTransform ros methods will be unavailable
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1792578790.357336   94795 gl_context_egl.cc:85] Successfully initialized EGL. Major : 1 Minor: 5
+I0000 00:00:1792578790.404832   94911 gl_context.cc:369] GL version: 3.2 (OpenGL ES 3.2 NVIDIA 580.126.09), renderer: NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+W0000 00:00:1792578790.429651   94894 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1792578790.443662   94901 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+[INFO] [1792578792.289078736] [robot_controller_node]: ✓ Connected to UR3e robot arm.
+[INFO] [1792578792.296108267] [robot_controller_node]: Returning to fixed Home: startup
+Loading SAM2 model...
+Loaded checkpoint sucessfully
+SAM2 model loaded
+Initializing RealSense for object segmentation/grasp...
+Initializing ZED Camera...
+[2026-10-21 10:33:13 UTC][ZED][INFO] Logging level INFO
+[2026-10-21 10:33:13 UTC][ZED][INFO] Logging level INFO
+[2026-10-21 10:33:13 UTC][ZED][INFO] Logging level INFO
+[2026-10-21 10:33:13 UTC][ZED][INFO] [Init]  Depth mode: NONE
+[2026-10-21 10:33:14 UTC][ZED][INFO] [Init]  Camera successfully opened.
+[2026-10-21 10:33:14 UTC][ZED][INFO] [Init]  Camera FW version: 1523
+[2026-10-21 10:33:14 UTC][ZED][INFO] [Init]  Video mode: HD720@30
+[2026-10-21 10:33:14 UTC][ZED][INFO] [Init]  Serial Number: S/N 35818386
+[2026-10-21 10:33:14 UTC][ZED][WARNING] [Init]  Self-calibration failed. Point the camera towards a more textured and brighter area. Avoid objects closer than 1 meter (Error code: 0x01) 
+Loaded checkpoint sucessfully
+Camera Started. UI Controls (focus on OpenCV window):
+  - w: Trigger SAM2 to detect Workpace
+  - Left-click drag / Left-click in ZED Viewer: only available in Manual selection mode
+  - Space: Execute only after READY; otherwise prepare grasp
+  - r: Reset Selection
+  - ESC: Stop and exit immediately without Home or gripper release
+  - 0: Open the gripper and return Home (idle, holding, or after a visible grasp failure)
+  - q: Return Home and quit when idle
+  - After moving to workspace, terminal asks: MLLM/manual
+Setting current SAM2 targets as workspace...
+Reset, select new targets.
+[INFO] [1792578803.166630584] [robot_controller_node]: Moving to dynamic start pose (30cm above workspace, 10cm toward base, tool0 X parallel to bbox edge): [0.05384862470647865, -0.3362655856148336, 0.24881106110622414, 2.097905022021861, 2.338460801395827, 0.0]
+
+[Object Selection] Workspace pose reached.
+Manual selection mode enabled. Use mouse in ZED Viewer as before.
+Processing ZED frame for GraspNet...
+/home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/src/graspnet-baseline/utils/loss_utils.py:89: UserWarning: Using torch.cross without specifying the dim arg is deprecated.
+Please either pass the dim explicitly or simply use torch.linalg.cross.
+The default value of dim will change to agree with that of linalg.cross in a future release. (Triggered internally at /pytorch/aten/src/ATen/native/Cross.cpp:62.)
+  axis_z = torch.cross(axis_x, axis_y)
+2F-85 filter: kept=4, width_rejected=2, clearance_rejected=1
+Grasp filtering (optional camera-axis + physical 2F-85): raw=71, nms=17, direction=5, physical_orientations=4, selected=4
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261021_183337
+READY: grasp and lift endpoint checks passed; review cameras then press SPACE.
+[INFO] [1792578824.206015417] [robot_controller_node]: 2F-85 target pose (Controller): [0.08525773673843214, -0.41251916918788023, -0.05698281858496804, -0.5087321220236978, 2.763077354172599, 0.08288342651334783]
+[INFO] [1792578824.357512637] [robot_controller_node]: Moving to approach pose...
+[INFO] [1792578829.481736984] [robot_controller_node]: Moving to target pose...
+[INFO] [1792578830.790057005] [robot_controller_node]: Closing gripper...
+[INFO] [1792578831.242044536] [robot_controller_node]: Gripper contact result: gap=0.044 m, effort=29.3 N, stalled=True
+[INFO] [1792578831.242468711] [robot_controller_node]: Lifting...
+[INFO] [1792578832.544942045] [robot_controller_node]: Raising object to 0.20 m above grasp TCP height...
+[INFO] [1792578834.296567431] [robot_controller_node]: Show the right palm to check delivery reachability. When READY, hold a right fist for 2 seconds, then open the palm for delivery. Unreachable targets can be repositioned without Home.
+W0000 00:00:1792578838.846260   94904 landmark_projection_calculator.cc:186] Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the square ROI. Provide IMAGE_DIMENSIONS or use PROJECTION_MATRIX.
+Reachable target confirmed by fist. Open RIGHT palm for 2s to deliver; reposition if red.
+Saved MediaPipe intent frame: /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/mediapipe_output/20261021_183414_470044/robot2human_open_palm_intent.jpg
+Confirmed delivery palm target in base_link: [-0.06465166085281127, 0.385099575124375, -0.04610977912644598]
+[INFO] [1792578854.984065375] [robot_controller_node]: Approaching above right-hand center in base_link z: [0.06465166085281127, -0.385099575124375, 0.10389022087355403, -0.508807404563738, 2.7631317704625076, 0.08276279533726501]
+[INFO] [1792578856.680545455] [robot_controller_node]: Moving to release pose 0.10 m above detected hand: [0.06465166085281127, -0.385099575124375, 0.05389022087355402, -0.508807404563738, 2.7631317704625076, 0.08276279533726501]
+[INFO] [1792578858.917511991] [robot_controller_node]: Object Released to Human.
+[INFO] [1792578860.770381648] [robot_controller_node]: Returning to fixed Home: handover completed
+Reset, select new targets.
+Setting current SAM2 targets as workspace...
+[INFO] [1792578868.391914776] [robot_controller_node]: Moving to dynamic start pose (30cm above workspace, 10cm toward base, tool0 X parallel to bbox edge): [-0.03580420662871635, -0.2980705116084458, 0.257392164347128, 1.806089226173847, 2.5705342067726145, 0.0]
+Reset, select new targets.
+
+[Object Selection] Workspace pose reached.
+Manual selection mode enabled. Use mouse in ZED Viewer as before.
+Target locked. Press r before selecting another object.
+Processing ZED frame for GraspNet...
+Selection cancelled; reselect the ZED target. In-flight inference results will be discarded.
+Reset, select new targets.
+Processing ZED frame for GraspNet...
+2F-85 filter: kept=4, width_rejected=1, clearance_rejected=3
+Grasp filtering (optional camera-axis + physical 2F-85): raw=65, nms=20, direction=6, physical_orientations=4, selected=4
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261021_183442
+READY: grasp and lift endpoint checks passed; review cameras then press SPACE.
+[INFO] [1792578888.220551540] [robot_controller_node]: 2F-85 target pose (Controller): [-0.054315963539709036, -0.36244298068353614, -0.0863227386779524, -1.6961936397835489, 2.052992455295894, -0.6211474068234958]
+[INFO] [1792578888.376407371] [robot_controller_node]: Moving to approach pose...
+[INFO] [1792578895.458180005] [robot_controller_node]: Moving to target pose...
+[INFO] [1792578896.765859673] [robot_controller_node]: Closing gripper...
+[INFO] [1792578897.217636292] [robot_controller_node]: Gripper contact result: gap=0.041 m, effort=29.3 N, stalled=True
+[INFO] [1792578897.218085027] [robot_controller_node]: Lifting...
+[INFO] [1792578898.523423636] [robot_controller_node]: Raising object to 0.20 m above grasp TCP height...
+[INFO] [1792578900.374047783] [robot_controller_node]: Show the right palm to check delivery reachability. When READY, hold a right fist for 2 seconds, then open the palm for delivery. Unreachable targets can be repositioned without Home.
+Manual release: opening the gripper and returning Home.
+[INFO] [1792578906.456514163] [robot_controller_node]: Returning to fixed Home: manual release (0 key)
+Reset, select new targets.
+Setting current SAM2 targets as workspace...
+Reset, select new targets.
+[INFO] [1792578918.723458256] [robot_controller_node]: Moving to dynamic start pose (30cm above workspace, 10cm toward base, tool0 X parallel to bbox edge): [-0.018954626506460733, -0.41928124479384465, 0.2480583328744957, 1.7724612517961187, 2.5938360611208053, 0.0]
+
+[Object Selection] Workspace pose reached.
+Manual selection mode enabled. Use mouse in ZED Viewer as before.
+Processing ZED frame for GraspNet...
+2F-85 filter: kept=2, width_rejected=5, clearance_rejected=1
+Candidate 0 (force_flip=False) rejected before READY: lift: no IK solution; xyz=[-0.03892846371594637, -0.4718374859383051, 0.12740994610330442]
+Candidate 1 (force_flip=True) rejected before READY: lift: no IK solution; xyz=[-0.038479917051510076, -0.472439090251691, 0.12739044603970617]
+Grasp filtering (optional camera-axis + physical 2F-85): raw=39, nms=15, direction=7, physical_orientations=2, selected=0
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261021_183530
+No valid grasp remains after physical 2F-85 and IK filtering. No automatic lowering/retry; select the target again.
+No valid grasp remains after physical 2F-85 and IK filtering.
+[INFO] [1792578931.467912061] [robot_controller_node]: Returning to fixed Home: no valid grasp
+Reset, select new targets.
+Setting current SAM2 targets as workspace...
+[INFO] [1792578942.843476369] [robot_controller_node]: Moving to dynamic start pose (30cm above workspace, 10cm toward base, tool0 X parallel to bbox edge): [-0.06855662670512166, -0.33625793055103453, 0.23960019782446157, 1.072082931392622, 2.953005687313514, 0.0]
+Reset, select new targets.
+
+[Object Selection] Workspace pose reached.
+Manual selection mode enabled. Use mouse in ZED Viewer as before.
+Processing ZED frame for GraspNet...
+2F-85 filter: kept=4, width_rejected=18, clearance_rejected=17
+Candidate 2 (force_flip=False) rejected before READY: lift: no IK solution; xyz=[-0.05845559450783673, -0.44295515389591616, 0.19579914009786276]
+Candidate 3 (force_flip=True) rejected before READY: lift: no IK solution; xyz=[-0.05771715747211875, -0.442858669302645, 0.19581505162567076]
+Grasp filtering (optional camera-axis + physical 2F-85): raw=320, nms=60, direction=37, physical_orientations=4, selected=2
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261021_183554
+READY: grasp and lift endpoint checks passed; review cameras then press SPACE.
+[INFO] [1792578956.949327796] [robot_controller_node]: 2F-85 target pose (Controller): [-0.04526698404141954, -0.42115459457809157, -0.005363590146176156, 3.0207633409759027, 0.6001058795295939, -0.44282581268129206]
+[INFO] [1792578957.100598105] [robot_controller_node]: Moving to approach pose...
+[INFO] [1792578962.767808704] [robot_controller_node]: Moving to target pose...
+[INFO] [1792578964.073661374] [robot_controller_node]: Closing gripper...
+[INFO] [1792578964.529928402] [robot_controller_node]: Gripper contact result: gap=0.054 m, effort=29.3 N, stalled=True
+[INFO] [1792578964.532825341] [robot_controller_node]: Lifting...
+[INFO] [1792578965.836644427] [robot_controller_node]: Raising object to 0.20 m above grasp TCP height...
+[INFO] [1792578967.578023963] [robot_controller_node]: Show the right palm to check delivery reachability. When READY, hold a right fist for 2 seconds, then open the palm for delivery. Unreachable targets can be repositioned without Home.
+Manual release: opening the gripper and returning Home.
+[INFO] [1792578973.348753387] [robot_controller_node]: Returning to fixed Home: manual release (0 key)
+Reset, select new targets.
+Selection cancelled; reselect the ZED target. In-flight inference results will be discarded.
+Reset, select new targets.
+Setting current SAM2 targets as workspace...
+Reset, select new targets.
+[INFO] [1792578989.998416833] [robot_controller_node]: Moving to dynamic start pose (30cm above workspace, 10cm toward base, tool0 X parallel to bbox edge): [0.0944493500981354, -0.33829495899641937, 0.2503622553960448, 2.183547117991472, -2.2587001537611178, 0.0]
+
+[Object Selection] Workspace pose reached.
+Manual selection mode enabled. Use mouse in ZED Viewer as before.
+Processing ZED frame for GraspNet...
+2F-85 filter: kept=32, width_rejected=23, clearance_rejected=14
+Candidate 8 (force_flip=False) rejected before READY: approach: no IK solution; xyz=[0.13993663934922568, -0.4839909209275128, -0.031363357335140535]
+Candidate 9 (force_flip=True) rejected before READY: approach: no IK solution; xyz=[0.13982427432952657, -0.48461489217536774, -0.031768997405864044]
+Candidate 10 (force_flip=False) rejected before READY: approach: no IK solution; xyz=[0.2524506786748915, -0.41709462045858314, -0.023775659735542395]
+Candidate 11 (force_flip=True) rejected before READY: approach: no IK solution; xyz=[0.2518135419416698, -0.4170955213789097, -0.023379988840185897]
+Candidate 12 (force_flip=False) rejected before READY: approach: no IK solution; xyz=[0.2497163832379425, -0.44920016265369206, -0.02867849653842043]
+Candidate 13 (force_flip=True) rejected before READY: approach: no IK solution; xyz=[0.2492020188451347, -0.44886337698159356, -0.02824895705433235]
+Candidate 14 (force_flip=False) rejected before READY: lift: no IK solution; xyz=[0.12916151155577013, -0.41142616257487663, 0.19294737968793352]
+Candidate 15 (force_flip=True) rejected before READY: lift: no IK solution; xyz=[0.12975596818151397, -0.41187491560056627, 0.19295684236942645]
+Candidate 18 (force_flip=False) rejected before READY: approach: no IK solution; xyz=[0.14412434886569428, -0.4418604301021476, 0.055817860047390144]
+Candidate 19 (force_flip=True) rejected before READY: approach: no IK solution; xyz=[0.1448705140608778, -0.4417910678852413, 0.05578743193090753]
+Candidate 30 (force_flip=False) rejected before READY: approach: no IK solution; xyz=[0.1235656120210102, -0.47929492632118176, -0.034269600613823795]
+Candidate 31 (force_flip=True) rejected before READY: approach: no IK solution; xyz=[0.1234446861308488, -0.4798536985830747, -0.03475503853399256]
+Grasp filtering (optional camera-axis + physical 2F-85): raw=920, nms=88, direction=53, physical_orientations=32, selected=20
+Still preparing; wait for READY.
+Saved ZED grasp capture to /home/ros2/Desktop/Robot-Hand/UR3e_Handover-master/captured_data/20261021_183644
+READY: grasp and lift endpoint checks passed; review cameras then press SPACE.
+[INFO] [1792579007.796511445] [robot_controller_node]: 2F-85 target pose (Controller): [0.18013755394146863, -0.42024268146588567, -0.048645777258307155, -0.7365387594259408, 2.9320678624969334, -0.6064765332372518]
+[INFO] [1792579007.948403472] [robot_controller_node]: Moving to approach pose...
+[INFO] [1792579011.233765126] [robot_controller_node]: Moving to target pose...
+[INFO] [1792579012.540495823] [robot_controller_node]: Closing gripper...
+[INFO] [1792579013.092228034] [robot_controller_node]: Gripper contact result: gap=0.032 m, effort=29.3 N, stalled=True
+[INFO] [1792579013.092531573] [robot_controller_node]: Lifting...
+[INFO] [1792579014.395233345] [robot_controller_node]: Raising object to 0.20 m above grasp TCP height...
+[INFO] [1792579016.165673991] [robot_controller_node]: Show the right palm to check delivery reachability. When READY, hold a right fist for 2 seconds, then open the palm for delivery. Unreachable targets can be repositioned without Home.
+Manual release: opening the gripper and returning Home.
+[INFO] [1792579105.698203640] [robot_controller_node]: Returning to fixed Home: manual release (0 key)
+Reset, select new targets.

@@ -1,0 +1,319 @@
+{
+  "approach_distance_m": 0.08,
+  "geometry_config": "config/robotiq_2f85.json",
+  "note": "Offline mesh screening only. CAD alignment uncertain, no IK or force-closure validation. Candidate zero was executed.",
+  "results": [
+    {
+      "scene": "observed",
+      "kept": 16,
+      "total": 16,
+      "candidates": [
+        {
+          "index": 0,
+          "flip": false,
+          "width_m": 0.07349759340286255,
+          "score": 0.4436829686164856,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 1,
+          "flip": true,
+          "width_m": 0.07349759340286255,
+          "score": 0.4436829686164856,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 2,
+          "flip": false,
+          "width_m": 0.06049561873078346,
+          "score": 0.4397987723350525,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 3,
+          "flip": true,
+          "width_m": 0.06049561873078346,
+          "score": 0.4397987723350525,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 4,
+          "flip": false,
+          "width_m": 0.055126164108514786,
+          "score": 0.3759303092956543,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 5,
+          "flip": true,
+          "width_m": 0.055126164108514786,
+          "score": 0.3759303092956543,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 6,
+          "flip": false,
+          "width_m": 0.06827417761087418,
+          "score": 0.3566519021987915,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 7,
+          "flip": true,
+          "width_m": 0.06827417761087418,
+          "score": 0.3566519021987915,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 8,
+          "flip": false,
+          "width_m": 0.07343925535678864,
+          "score": 0.24205344915390015,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 9,
+          "flip": true,
+          "width_m": 0.07343925535678864,
+          "score": 0.24205344915390015,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 10,
+          "flip": false,
+          "width_m": 0.05917586758732796,
+          "score": 0.2242850959300995,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 11,
+          "flip": true,
+          "width_m": 0.05917586758732796,
+          "score": 0.2242850959300995,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 12,
+          "flip": false,
+          "width_m": 0.07195726782083511,
+          "score": 0.17537474632263184,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 13,
+          "flip": true,
+          "width_m": 0.07195726782083511,
+          "score": 0.17537474632263184,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 14,
+          "flip": false,
+          "width_m": 0.07492408156394958,
+          "score": 0.14460918307304382,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 15,
+          "flip": true,
+          "width_m": 0.07492408156394958,
+          "score": 0.14460918307304382,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        }
+      ]
+    },
+    {
+      "scene": "observed_plus_aligned_cad",
+      "kept": 14,
+      "total": 16,
+      "candidates": [
+        {
+          "index": 0,
+          "flip": false,
+          "width_m": 0.07349759340286255,
+          "score": 0.4436829686164856,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 1,
+          "flip": true,
+          "width_m": 0.07349759340286255,
+          "score": 0.4436829686164856,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 2,
+          "flip": false,
+          "width_m": 0.06049561873078346,
+          "score": 0.4397987723350525,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 3,
+          "flip": true,
+          "width_m": 0.06049561873078346,
+          "score": 0.4397987723350525,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 4,
+          "flip": false,
+          "width_m": 0.055126164108514786,
+          "score": 0.3759303092956543,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 5,
+          "flip": true,
+          "width_m": 0.055126164108514786,
+          "score": 0.3759303092956543,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 6,
+          "flip": false,
+          "width_m": 0.06827417761087418,
+          "score": 0.3566519021987915,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 7,
+          "flip": true,
+          "width_m": 0.06827417761087418,
+          "score": 0.3566519021987915,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 8,
+          "flip": false,
+          "width_m": 0.07343925535678864,
+          "score": 0.24205344915390015,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 9,
+          "flip": true,
+          "width_m": 0.07343925535678864,
+          "score": 0.24205344915390015,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 10,
+          "flip": false,
+          "width_m": 0.05917586758732796,
+          "score": 0.2242850959300995,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 11,
+          "flip": true,
+          "width_m": 0.05917586758732796,
+          "score": 0.2242850959300995,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 12,
+          "flip": false,
+          "width_m": 0.07195726782083511,
+          "score": 0.17537474632263184,
+          "ok": false,
+          "rejection": "closure: 2F85 link/scene penetration",
+          "collisions": [
+            {
+              "link": "robotiq_85_left_finger_tip_link",
+              "penetrating_points": 5
+            }
+          ]
+        },
+        {
+          "index": 13,
+          "flip": true,
+          "width_m": 0.07195726782083511,
+          "score": 0.17537474632263184,
+          "ok": false,
+          "rejection": "closure: 2F85 link/scene penetration",
+          "collisions": [
+            {
+              "link": "robotiq_85_right_finger_tip_link",
+              "penetrating_points": 5
+            }
+          ]
+        },
+        {
+          "index": 14,
+          "flip": false,
+          "width_m": 0.07492408156394958,
+          "score": 0.14460918307304382,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        },
+        {
+          "index": 15,
+          "flip": true,
+          "width_m": 0.07492408156394958,
+          "score": 0.14460918307304382,
+          "ok": true,
+          "rejection": "",
+          "collisions": []
+        }
+      ]
+    }
+  ]
+}

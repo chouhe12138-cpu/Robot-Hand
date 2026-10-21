@@ -1,5 +1,6 @@
 {
   "post_grasp_lift_height_m": 0.2,
   "grasp_move_speed_m_s": 0.1,
-  "grasp_move_acceleration_m_s2": 0.2
+  "grasp_move_acceleration_m_s2": 0.2,
+  "gripper_force_N": 30.0
 }

@@ -58,6 +58,7 @@ SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
 from robotiq_grasp import grasp_meshes, grasp_tcp_pose
 from grasp_preparation import prepare_ready_grasps, ready_rejection_reason, filter_by_camera_direction
+from camera_view import create_camera_view, draw_handover_hint, draw_physical_hand
 from handover_runtime import load_home_joints, move_home, load_motion_settings, post_grasp_lift_pose
 sys.path.append(os.path.join(BASELINE_DIR, 'models'))
 sys.path.append(os.path.join(BASELINE_DIR, 'dataset'))
@@ -365,6 +366,8 @@ class RobotControllerNode(Node):
             self.ensure_running()
             self.get_logger().info(f"Returning to fixed Home: {reason}")
             move_home(self.rtde_c, self.rtde_r, self.home_joints)
+            if not self.send_gripper_command(.085):
+                raise RuntimeError("Home reached but gripper opening was not confirmed")
             self.handover_follow_pose = None
             self.handover_deadline = None
             self.handover_error = ""
@@ -378,7 +381,7 @@ class RobotControllerNode(Node):
             self.get_logger().error(f"Home return blocked: {e}")
             return False
 
-    def send_gripper_command(self, position, speed=0.15, force=60.0, allow_stall=False):
+    def send_gripper_command(self, position, speed=0.15, force=None, allow_stall=False):
         """Command the gripper.
 
         allow_stall treats a jaw stopped by an object as success; the adapter
@@ -388,7 +391,7 @@ class RobotControllerNode(Node):
         if not self._action_client.wait_for_server(timeout_sec=5.0): return False
         goal_msg = GripperCommand.Goal()
         goal_msg.command.position = position
-        goal_msg.command.max_effort = force
+        goal_msg.command.max_effort = self.motion_settings['gripper_force_N'] if force is None else force
         goal_msg.command.max_speed = speed
         self.ensure_running()
         send_goal_future = self._action_client.send_goal_async(goal_msg)
@@ -1325,62 +1328,6 @@ pending_bbox = None
 pending_point = None
 rs_selection_locked = False
 
-def create_camera_view(name, initial_width, initial_height, on_mouse):
-    """Resize the displayed pixels with the viewport; retain source selection coordinates."""
-    transform = None
-    viewport = (initial_width, initial_height)
-    last_size_check = 0.0
-    size_warning_logged = False
-    cv2.namedWindow(name, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO | cv2.WINDOW_GUI_NORMAL)
-    cv2.resizeWindow(name, initial_width, initial_height)
-
-    def mouse(event, x, y, flags, param):
-        if transform is None:
-            return
-        left, top, scaled_w, scaled_h, source_w, source_h = transform
-        if event == cv2.EVENT_LBUTTONDOWN and not (
-                left <= x < left + scaled_w and top <= y < top + scaled_h):
-            return
-        source_x = min(source_w - 1, max(0, int((x - left) * source_w / scaled_w)))
-        source_y = min(source_h - 1, max(0, int((y - top) * source_h / scaled_h)))
-        on_mouse(event, source_x, source_y, flags, param)
-
-    cv2.setMouseCallback(name, mouse)
-
-    def show(frame):
-        nonlocal transform, viewport, last_size_check, size_warning_logged
-        # This workstation's Qt backend reports the source image size from
-        # getWindowImageRect, even when the actual window is much larger.
-        # GUI_NORMAL has no toolbar, so the X11 client size is our canvas size.
-        now = time.monotonic()
-        if now - last_size_check >= 0.2:
-            last_size_check = now
-            try:
-                info = subprocess.run(["xwininfo", "-name", name], capture_output=True,
-                                      text=True, timeout=0.2, check=True).stdout
-                width_match = re.search(r"^\s*Width:\s*(\d+)", info, re.MULTILINE)
-                height_match = re.search(r"^\s*Height:\s*(\d+)", info, re.MULTILINE)
-                if width_match and height_match:
-                    size = int(width_match[1]), int(height_match[1])
-                    if min(size) > 1:
-                        viewport = size
-            except (OSError, subprocess.SubprocessError) as error:
-                if not size_warning_logged:
-                    logging.warning("Cannot read camera window size; using last size: %s", error)
-                    size_warning_logged = True
-        width, height = viewport
-        source_h, source_w = frame.shape[:2]
-        scale = min(width / source_w, height / source_h)
-        scaled_w, scaled_h = max(1, round(source_w * scale)), max(1, round(source_h * scale))
-        left, top = (width - scaled_w) // 2, (height - scaled_h) // 2
-        canvas = np.zeros((height, width, 3), dtype=frame.dtype)
-        canvas[top:top + scaled_h, left:left + scaled_w] = cv2.resize(
-            frame, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
-        transform = left, top, scaled_w, scaled_h, source_w, source_h
-        cv2.imshow(name, canvas)
-
-    return show
-
 
 def mouse_callback(event, x, y, flags, param):
     global drawing, ix, iy, fx_mouse, fy_mouse, pending_bbox, pending_point, rs_selection_locked
@@ -2073,6 +2020,18 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                                  "physical_orientation_count": physical_count,
                                  "selected_symmetry_flips": selected_flips,
                                  "endpoint_rejections": endpoint_rejections,
+                                 "camera_to_base": {
+                                     "source_frame": "zed_inhand_camera_frame_optical",
+                                     "target_frame": "base_link",
+                                     "translation_m": [tf_msg.transform.translation.x,
+                                                       tf_msg.transform.translation.y,
+                                                       tf_msg.transform.translation.z],
+                                     "quaternion_xyzw": [tf_msg.transform.rotation.x,
+                                                         tf_msg.transform.rotation.y,
+                                                         tf_msg.transform.rotation.z,
+                                                         tf_msg.transform.rotation.w]},
+                                 "ready_plan_controller": ready_plan,
+                                 "gripper_force_N": ROS_NODE.motion_settings['gripper_force_N'],
                                  "lift_height_m": ROS_NODE.motion_settings['post_grasp_lift_height_m']},
                     force_flips=selected_flips,
                 )
@@ -2303,13 +2262,12 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                     right_hand_landmarks, right_hand_score = select_right_hand(results)
 
                     if right_hand_landmarks:
-                        mp_drawing.draw_landmarks(display, right_hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                        draw_physical_hand(display, right_hand_landmarks, right_hand_score,
+                                           "Right", mp_drawing, mp_hands.HAND_CONNECTIONS)
 
                         h, w, _ = display.shape
                         palm_center_lm = right_hand_landmarks.landmark[9]
                         cx, cy = int(palm_center_lm.x * w), int(palm_center_lm.y * h)
-                        cv2.circle(display, (cx, cy), 10, (255, 0, 0), cv2.FILLED)
-                        cv2.putText(display, f"Physical Right hand {right_hand_score:.2f}", (cx-70, cy-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
                         if STATE in ("WAITING_HANDOVER_START_POSE", "WAITING_HANDOVER_OPEN"):
                             now = time.monotonic()
@@ -2360,10 +2318,8 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                                 hint = "FIST CONFIRMED: keep palm open; adjust position"
                             elif STATE == "WAITING_HANDOVER_START_POSE" and handover_fist_since is not None:
                                 hint = f"Hold RIGHT FIST: {min(2.0, now - handover_fist_since):.1f}/2.0s"
-                            cv2.putText(display, hint, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, .6, color, 2)
-                            if fresh and preview["error"]:
-                                cv2.putText(display, preview["error"][:85], (10, 95),
-                                            cv2.FONT_HERSHEY_SIMPLEX, .45, color, 1)
+                            draw_handover_hint(display, hint, color,
+                                               preview["error"] if fresh else "")
                             deliver_requested = False
                             if STATE == "WAITING_HANDOVER_START_POSE":
                                 # Closing the hand changes its depth/pixels. Once the

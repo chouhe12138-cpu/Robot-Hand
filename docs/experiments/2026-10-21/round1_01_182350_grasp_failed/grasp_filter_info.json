@@ -1,0 +1,56 @@
+{
+  "timestamp": "20261021_182350",
+  "note": "robot2human",
+  "raw_count": 74,
+  "selected_count": 16,
+  "image_size": {
+    "width": 640,
+    "height": 360
+  },
+  "network_raw_count": 601,
+  "nms_count": 74,
+  "direction_count": 53,
+  "all_directions": false,
+  "physical_orientation_count": 20,
+  "selected_symmetry_flips": [
+    false,
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+    true,
+    false,
+    true
+  ],
+  "endpoint_rejections": [
+    {
+      "candidate": 4,
+      "force_flip": false,
+      "reason": "approach: no IK solution; xyz=[0.02434495773436749, -0.4546263080534922, -0.019259545036713316]"
+    },
+    {
+      "candidate": 5,
+      "force_flip": true,
+      "reason": "approach: no IK solution; xyz=[0.024475003145787204, -0.4549931490860777, -0.019892729247644188]"
+    },
+    {
+      "candidate": 10,
+      "force_flip": false,
+      "reason": "approach: no IK solution; xyz=[-0.03190055852136414, -0.4497924434110088, 0.015092967335246912]"
+    },
+    {
+      "candidate": 11,
+      "force_flip": true,
+      "reason": "approach: no IK solution; xyz=[-0.03120744586504514, -0.450077401598299, 0.01506308150153389]"
+    }
+  ],
+  "lift_height_m": 0.2
+}

@@ -40,6 +40,7 @@ def move_home(control, receiver, joints):
 def load_motion_settings():
     settings = json.loads((HOME_PATH.parent / 'handover_motion.json').read_text())
     limits = {
+        'gripper_force_N': (20., 235.),
         'post_grasp_lift_height_m': (.10, .40),
         'grasp_move_speed_m_s': (.01, .15),
         'grasp_move_acceleration_m_s2': (.01, .50),

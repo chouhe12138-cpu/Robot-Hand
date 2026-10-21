@@ -1,5 +1,7 @@
 # 本机环境与迁移记录
 
+文档定位（2026-10-21）：本文件保留环境说明及 10 月 19 日迁移、逐次测试的历史记录；当前流程、参数、标定选择和待办统一见 [PROJECT_HANDOVER.md](PROJECT_HANDOVER.md)。历史段落中的“本次”“当前”“尚未同步”均指当时版本，不代表最新状态，也不延续硬件授权。
+
 2026-10-19 从 `/home/ros2/Desktop/Object-Hand` 迁移。本项目根目录为
 `/home/ros2/Desktop/Robot-Hand/UR3e_Handover-master`。
 
@@ -31,15 +33,17 @@ source activate_handover.bash
 
 ## 生效的手眼标定
 
-现有启动命令已使用本机最新标定，帧名称保持与交接代码一致：
+启动文件在节点启动时选择最新完整 ZED 标定及最新质量通过的 D435i 标定；需重启对应节点才会读取新结果，不能由文件推断当前正在发布的 TF。帧名称保持与交接代码一致：
 
 ```bash
 ros2 launch calibration_result eye_in_hand_zed2i.launch.py
 ros2 launch calibration_result eye_to_hand_rs_d435i.launch.py
 ```
 
-- ZED：`calibration_data/zed_eye_in_hand_20261019_140354_716625/calibrated_result/zed_tool0_calibration.json`
-- D435i：`calibration_data/d435_eye_to_hand_20261018_204340_085125/calibrated_result/d435_base_calibration.json`
+本次文档核对时最新文件（2026-10-21）：
+
+- ZED：`calibration_data/zed_eye_in_hand_20261020_130247_132605/calibrated_result/zed_tool0_calibration.json`
+- D435i：`calibration_data/d435_eye_to_hand_20261020_130813_896205/calibrated_result/d435_base_calibration.json`
 - 仓库原始外参启动文件：`calibration_data/upstream_launch/`
 - 旧仓库较早的本地外参启动文件：`calibration_data/legacy_launch/`
 
@@ -68,20 +72,18 @@ ros2 launch calibration_result eye_in_hand_zed2i.launch.py
 ros2 launch calibration_result eye_to_hand_rs_d435i.launch.py
 ```
 
-另一个终端激活环境后，在终端中设置自己的 API 密钥（不要提交到仓库）：
+另一个终端激活环境后，人工选择模式无需 API 密钥：
 
 ```bash
-export ARK_API_KEY='你的密钥'
-cd src/graspnet-baseline/zedInhand_rsTohand
-# 只运行需要的一个方向
-python human2robot_handover.py --debug
-# 或 python robot2human_handover.py --debug
+# 在项目根目录，只运行需要的一个方向
+python -u src/graspnet-baseline/zedInhand_rsTohand/human2robot_handover.py --manual --debug
+# 或 python -u src/graspnet-baseline/zedInhand_rsTohand/robot2human_handover.py --manual --debug
 ```
 
 主脚本会直接连接机器人，初始化期间可能运动；`--debug` 不会禁用运动。
-本次仅做离线环境和加载检查，未启动相机、机器人或夹爪。
+若使用大模型选择模式，需自行配置 API 密钥与权限，勿提交密钥。历史环境检查和后续真机测试分别记录在下文。
 
-## 当前限制
+## 迁移时环境限制（历史）
 
 已确认 GPU 在沙箱外正常可用：NVIDIA GeForce RTX 4060 Laptop GPU，8 GB 显存，
 驱动 580.126.09，PyTorch 2.6.0+cu124。沙箱内缺少 `/dev/nvidia*`，属于设备隔离，
@@ -99,7 +101,7 @@ colcon build --packages-select calibration_result robotiq_2f_urcap_adapter \
 source install/local_setup.bash
 ```
 
-## 本次离线检查结果
+## 迁移时离线检查结果（历史）
 
 - PyTorch 2.6.0+cu124、OpenCV 4.11.0、MediaPipe 0.10.21，以及相机、RTDE、豆包 SDK、GraspNet CUDA 扩展导入通过。
 - GraspNet、SAM2、FFS 权重 CPU 加载通过；沙箱外 GPU 检查也通过：PointNet2/kNN CUDA 运算、GraspNet 推理、SAM2 提示分割与跟踪、FFS 深度推理。
@@ -107,7 +109,11 @@ source install/local_setup.bash
 - `calibration_result` 和 `robotiq_2f_urcap_adapter` 编译完成，GripperCommand 类型支持加载通过。
 - 激活脚本 Shell 语法和修改的 Python 文件语法检查通过。
 
-## GraspNet 的实体 2F-85 模型
+## 历史开发与测试记录（2026-10-19）
+
+以下内容保留当时行为和验证边界；当前共享筛选、朝向保留、异常策略及入口差异见项目交接文档。
+
+### GraspNet 的实体 2F-85 模型
 
 两个主交接入口现共用 `robotiq_grasp.py` 和从旧工作区复用的 `robotiq_2f85_model.py`。
 实体网格、联动关节描述及许可证位于 `vendor/ros2_robotiq_gripper/`；这是描述资源，不启动其硬件驱动。

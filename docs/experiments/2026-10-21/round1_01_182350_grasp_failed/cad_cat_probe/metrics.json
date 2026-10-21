@@ -1,0 +1,17 @@
+{
+  "capture": "20261021_182350",
+  "model": "models/obj_06.ply",
+  "object_id": 6,
+  "cad_scale": 0.001,
+  "seed": 17,
+  "voxel_m": 0.0035,
+  "coverage_tolerance_m": 0.007,
+  "observation_points": 2850,
+  "coarse_fitness": 0.3606853020739405,
+  "refined_full_cad_to_partial_fitness": 0.4009,
+  "refined_inlier_rmse_m": 0.0038394238953236614,
+  "observation_covered": 0.6940350877192982,
+  "observation_to_cad_rmse_m": 0.009290318495005235,
+  "observation_to_cad_median_m": 0.0027582551314476057,
+  "observation_to_cad_p95_m": 0.018959598144195164
+}

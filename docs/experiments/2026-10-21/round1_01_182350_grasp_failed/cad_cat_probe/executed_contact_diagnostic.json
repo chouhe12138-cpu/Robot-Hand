@@ -1,0 +1,13 @@
+{
+  "executed_grasp_midpoint_pixel": [
+    424.9999941948586,
+    117.00000209733184
+  ],
+  "midpoint_inside_object_mask": true,
+  "cad_closing_centreline_intersects": false,
+  "centreline_ray_distances_m": [
+    null,
+    null
+  ],
+  "note": "Single centre line only: not a contact area or force closure certificate; trial 1 alignment is unreliable."
+}
