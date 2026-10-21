@@ -56,7 +56,8 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASELINE_DIR = os.path.dirname(ROOT_DIR)
 SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
-from robotiq_grasp import grasp_meshes, grasp_tcp_pose, filter_grasps
+from robotiq_grasp import grasp_meshes, grasp_tcp_pose
+from grasp_preparation import prepare_ready_grasps, ready_rejection_reason
 from handover_runtime import load_home_joints, move_home, load_motion_settings, post_grasp_lift_pose
 sys.path.append(os.path.join(BASELINE_DIR, 'models'))
 sys.path.append(os.path.join(BASELINE_DIR, 'dataset'))
@@ -2059,31 +2060,21 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                 # Wider directions require explicit opt-in, never bypass physical/IK checks.
                 gg_camera = gg_nms if all_directions else filter_grasps_by_camera_direction(gg_nms, camera_rot_mat).sort_by_score()
                 orient_count = len(gg_camera)
-                gg_filtered, physical_flips = filter_grasps(gg_camera, np.asarray(cloud_o3d.points), BACKOFF_DIST, return_flips=True)
-                physical_count = len(gg_filtered)
-                # READY requires feasible approach, grasp and the configured lift.
-                ready_plan = None
-                endpoint_rejections = []
-                reachable = []
-                for index, candidate in enumerate(gg_filtered):
-                    if selection_cancelled():
-                        return
-                    try:
-                        candidate_plan = ROS_NODE.build_grasp_plan(candidate, force_flip=physical_flips[index])
-                        ROS_NODE.validate_grasp_plan(candidate_plan)
-                    except ValueError as e:
-                        zed_ui["last_error"] = str(e)
-                        endpoint_rejections.append({"candidate": index,
-                                                    "force_flip": physical_flips[index],
-                                                    "reason": str(e)})
-                        logging.warning("Candidate %d (force_flip=%s) rejected before READY: %s",
-                                        index, physical_flips[index], e)
-                        continue
-                    reachable.append(index)
-                    if ready_plan is None:
-                        ready_plan = candidate_plan
-                gg_filtered = gg_filtered[np.asarray(reachable, dtype=int)]
-                selected_flips = [physical_flips[index] for index in reachable]
+                # Shared R2H/H2R selection: one validated plan per physical symmetry.
+                def log_endpoint_rejection(index, flip, error):
+                    zed_ui["last_error"] = str(error)
+                    logging.warning("Candidate %d (force_flip=%s) rejected before READY: %s",
+                                    index, flip, error)
+
+                prepared_candidates = prepare_ready_grasps(
+                    gg_camera, np.asarray(cloud_o3d.points), BACKOFF_DIST,
+                    ROS_NODE.build_grasp_plan, ROS_NODE.validate_grasp_plan,
+                    cancelled=selection_cancelled,
+                    on_rejected=log_endpoint_rejection,
+                )
+                if prepared_candidates is None:
+                    return
+                gg_filtered, selected_flips, ready_plan, physical_count, endpoint_rejections = prepared_candidates
                 selected_count = len(gg_filtered)
                 logging.info(
                     "Grasp filtering (optional camera-axis + physical 2F-85): "
@@ -2655,14 +2646,13 @@ def main(debug=False, voice_prompt_seconds=4.0, grasp_only=False, manual=False, 
                 elif prepared is not None:
                     zed_ui["prepared_grasp"] = None
                     grasps, expected_q, ready_time, ready_plan = prepared
-                    actual_q = np.array(ROS_NODE.rtde_r.getActualQ())
-                    if (time.monotonic() - ready_time > 30.0 or expected_q is None
-                            or time.monotonic() - rs_latest["frame_time"] > 2.0
-                            or time.monotonic() - zed_ui.get("frame_time", 0.0) > 2.0
-                            or np.max(np.abs(actual_q - expected_q)) > .01):
-                        logging.warning("READY cancelled: camera stale or robot changed. Press SPACE to prepare again.")
-                    elif max(abs(v) for v in ROS_NODE.rtde_r.getActualQd()) > .003:
-                        logging.warning("Robot is moving; READY cancelled.")
+                    rejection = ready_rejection_reason(
+                        expected_q, ready_time, ROS_NODE.rtde_r.getActualQ(),
+                        camera_frame_times=(rs_latest["frame_time"], zed_ui.get("frame_time", 0.0)),
+                        joint_velocities=ROS_NODE.rtde_r.getActualQd(),
+                    )
+                    if rejection is not None:
+                        logging.warning("READY cancelled: %s. Press SPACE to prepare again.", rejection)
                     else:
                         STATE = "GRASPING"
                         def execute_prepared_grasp(selected, plan):
