@@ -55,7 +55,8 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASELINE_DIR = ROOT_DIR if os.path.isdir(os.path.join(ROOT_DIR, "models")) else os.path.dirname(ROOT_DIR)
 SRC_DIR = os.path.dirname(BASELINE_DIR)
 sys.path.insert(0, os.path.dirname(SRC_DIR))
-from robotiq_grasp import grasp_meshes, grasp_tcp_pose, filter_grasps
+from robotiq_grasp import grasp_meshes, grasp_tcp_pose
+from grasp_preparation import prepare_ready_grasps, ready_rejection_reason
 from handover_runtime import load_home_joints, move_home
 
 sys.path.append(BASELINE_DIR)
@@ -1545,86 +1546,6 @@ def resolve_checkpoint_path():
         f"GraspNet checkpoint not found. Tried:\n  - {ckpt_rs}\n  - {ckpt_fallback}"
     )
 
-def start_realsense():
-    pipeline = rs.pipeline()
-    config = rs.config()
-    # RealSense uses its own supported RGB-D mode; do not reuse ZED's 640x360 viewer size.
-    rs_width = 640
-    rs_height = 480
-    config.enable_stream(rs.stream.depth, rs_width, rs_height, rs.format.z16, 30)
-    config.enable_stream(rs.stream.color, rs_width, rs_height, rs.format.rgb8, 30)
-    
-    profile = pipeline.start(config)
-    align_to = rs.stream.color
-    align = rs.align(align_to)
-    
-    depth_sensor = profile.get_device().first_depth_sensor()
-    depth_scale = depth_sensor.get_depth_scale() 
-    factor_depth = 1.0 / depth_scale 
-    
-    color_profile = rs.video_stream_profile(profile.get_stream(rs.stream.color))
-    intrinsics = color_profile.get_intrinsics()
-    
-    camera = CameraInfo(float(rs_width), float(rs_height), intrinsics.fx, intrinsics.fy, intrinsics.ppx, intrinsics.ppy, factor_depth)
-    return pipeline, align, camera
-
-def process_frame(color_img, depth_img, camera, device, sam_mask=None, num_point=20000):
-    color = color_img.astype(np.float32) / 255.0
-    
-    if sam_mask is not None and np.any(sam_mask):
-        workspace_mask = (sam_mask > 0) & (depth_img > 0) & (depth_img < 2000)
-    else:
-        z_min_mm, z_max_mm = 100, 1000 
-        workspace_mask = (depth_img > z_min_mm) & (depth_img < z_max_mm)
-    
-    cloud = create_point_cloud_from_depth_image(depth_img, camera, organized=True)
-    mask = (workspace_mask & (depth_img > 0))
-    cloud_masked = cloud[mask]
-    color_masked = color[mask]
-    
-    if len(cloud_masked) == 0:
-        return None, None, None
-
-    cloud_masked_denoised, color_masked_denoised = denoise_points(cloud_masked, color_masked)
-    if len(cloud_masked_denoised) > 0:
-        cloud_masked = cloud_masked_denoised
-        color_masked = color_masked_denoised
-        
-    if len(cloud_masked) >= num_point:
-        idxs = np.random.choice(len(cloud_masked), num_point, replace=False)
-    else:
-        idxs1 = np.arange(len(cloud_masked))
-        idxs2 = np.random.choice(len(cloud_masked), num_point-len(cloud_masked), replace=True)
-        idxs = np.concatenate([idxs1, idxs2], axis=0)
-        
-    cloud_sampled = cloud_masked[idxs]
-    color_sampled = color_masked[idxs]
-
-    # 保存用于可视化的完整点云
-    valid_depth_mask = depth_img > 0
-    cloud_full = cloud[valid_depth_mask]
-    color_full = color[valid_depth_mask]
-    cloud_full_denoised, color_full_denoised = denoise_points(cloud_full, color_full)
-    if len(cloud_full_denoised) > 0:
-        cloud_full = cloud_full_denoised
-        color_full = color_full_denoised
-    
-    cloud_o3d = o3d.geometry.PointCloud()
-    cloud_o3d.points = o3d.utility.Vector3dVector(cloud_full.astype(np.float32))
-    cloud_o3d.colors = o3d.utility.Vector3dVector(color_full.astype(np.float32))
-    
-    end_points = dict()
-    cloud_sampled_tensor = torch.from_numpy(cloud_sampled[np.newaxis].astype(np.float32)).to(device, dtype=torch.float32)
-    with torch.autocast(device_type="cuda", dtype=torch.float32):
-        pass 
-    end_points['point_clouds'] = cloud_sampled_tensor
-    end_points['cloud_colors'] = color_sampled
-    
-    return end_points, cloud_o3d, workspace_mask
-
-def show_open3d_process(points, colors, gg_array, force_flips=None):
-    get_open3d_viewer().update(points, colors, gg_array, top_k=1, force_flips=force_flips)
-
 
 def denoise_points(points, colors):
     if len(points) == 0:
@@ -2115,6 +2036,8 @@ def main(debug=False, manual=False, all_directions=False):
     handover_grasp_running = False
     workspace_calc_running = False
     prepared_grasp = None
+    last_zed_frame_time = 0.0
+    last_rs_frame_time = 0.0
     recovery_running = False
     release_on_recovery = False
 
@@ -2211,28 +2134,12 @@ def main(debug=False, manual=False, all_directions=False):
                 gg_camera = (gg_nms if all_directions
                              else filter_grasps_by_camera_direction(gg_nms, camera_rot_mat).sort_by_score())
                 orient_count = len(gg_camera)
-                gg_physical, physical_flips = filter_grasps(
-                    gg_camera, np.asarray(cloud_o3d.points),
-                    GRASP_BACKOFF_DIST, return_flips=True)
-                physical_count = len(gg_physical)
-                reachable, endpoint_rejections = [], []
-                ready_plan = None
-                for index, candidate in enumerate(gg_physical):
-                    try:
-                        candidate_plan = ROS_NODE.build_grasp_plan(
-                            candidate, force_flip=physical_flips[index])
-                        ROS_NODE.validate_grasp_plan(candidate_plan)
-                    except ValueError as exc:
-                        endpoint_rejections.append({
-                            "candidate": index, "force_flip": physical_flips[index],
-                            "reason": str(exc),
-                        })
-                        continue
-                    reachable.append(index)
-                    if ready_plan is None:
-                        ready_plan = candidate_plan
-                gg_filtered = gg_physical[np.asarray(reachable, dtype=int)]
-                selected_flips = [physical_flips[index] for index in reachable]
+                # Same physical symmetry + endpoint IK screening as R2H.
+                prepared_candidates = prepare_ready_grasps(
+                    gg_camera, np.asarray(cloud_o3d.points), GRASP_BACKOFF_DIST,
+                    ROS_NODE.build_grasp_plan, ROS_NODE.validate_grasp_plan,
+                )
+                gg_filtered, selected_flips, ready_plan, physical_count, endpoint_rejections = prepared_candidates
                 logging.info(
                     "H2R grasp filtering: nms=%d, direction=%d, physical_orientations=%d, ready=%d",
                     raw_count, orient_count, physical_count, len(gg_filtered))
@@ -2358,6 +2265,7 @@ def main(debug=False, manual=False, all_directions=False):
 
             left_rgb = left_bgr[:, :, ::-1].copy()
             right_rgb = right_bgr[:, :, ::-1].copy()
+            last_zed_frame_time = time.monotonic()
 
             frames = pipeline.wait_for_frames()
             aligned_frames = align.process(frames)
@@ -2367,6 +2275,7 @@ def main(debug=False, manual=False, all_directions=False):
                 continue
             rs_color_image = np.asanyarray(rs_color_frame.get_data())
             rs_depth_image = np.asanyarray(rs_depth_frame.get_data())
+            last_rs_frame_time = time.monotonic()
             rs_color_image_bgr = cv2.cvtColor(rs_color_image, cv2.COLOR_RGB2BGR)
 
             color_img_bgr = rs_color_image_bgr.copy()
@@ -2524,6 +2433,9 @@ def main(debug=False, manual=False, all_directions=False):
                     cv2.putText(zed_display, zed_manual_hint, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
 
                 if STATE == "HANDOVER_SEGMENTATION":
+                    if prepared_grasp is not None:
+                        cv2.putText(zed_display, "READY: review grasp then press SPACE",
+                                    (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                     if zed_grasp_request_pending:
                         wait_left = max(0.0, SAM2_SETTLE_SECONDS - (time.time() - zed_segmentation_ready_time))
                         rs_hint = f"ZED Segmentation | waiting {wait_left:.1f}s -> GraspNet | r=Reset | q=Quit"
@@ -2854,9 +2766,13 @@ def main(debug=False, manual=False, all_directions=False):
                         continue
                     selected, expected_q, ready_time, ready_plan = prepared_grasp
                     prepared_grasp = None
-                    if (time.monotonic() - ready_time > 30.0
-                            or np.max(np.abs(np.array(ROS_NODE.rtde_r.getActualQ()) - expected_q)) > .01):
-                        logging.warning("READY expired or robot moved; press SPACE to prepare again.")
+                    rejection = ready_rejection_reason(
+                        expected_q, ready_time, ROS_NODE.rtde_r.getActualQ(),
+                        camera_frame_times=(last_rs_frame_time, last_zed_frame_time),
+                        joint_velocities=ROS_NODE.rtde_r.getActualQd(),
+                    )
+                    if rejection is not None:
+                        logging.warning("READY cancelled: %s. Press SPACE to prepare again.", rejection)
                         continue
                     handover_grasp_running = True
                     STATE = "GRASPING"
