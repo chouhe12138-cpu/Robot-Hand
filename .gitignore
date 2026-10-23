@@ -34,6 +34,7 @@ src/graspnet-baseline/logs/
 .zed-sdk/
 calibration_data/
 captured_data/
+collected_cad_data/
 calibration/calib_imgs/
 Fast-FoundationStereo/calibration/calibration_realsense/calib_imgs/
 Fast-FoundationStereo/calibration/calibration_usb_camera/calib_imgs/
